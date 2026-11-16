@@ -1,0 +1,87 @@
+# Operating system and editor state
+.DS_Store
+Thumbs.db
+Desktop.ini
+**/.vs/
+**/.idea/
+**/.vscode/
+*.user
+*.suo
+*.swp
+*.tmp
+*.log
+
+# Temporary work and generated reports/artifacts
+**/.staging/
+**/artifacts/
+**/TestResults/
+**/coverage/
+**/.nyc_output/
+
+# .NET build output
+**/bin/
+**/obj/
+**/publish/
+*.nupkg
+*.snupkg
+
+# Flutter / Dart generated output and local state
+**/.dart_tool/
+**/.pub-cache/
+**/.pub/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/build/
+**/android/.gradle/
+**/android/local.properties
+**/ios/Flutter/.last_build_id
+**/windows/flutter/ephemeral/
+**/linux/flutter/ephemeral/
+**/macos/Flutter/ephemeral/
+
+# Node / web generated output
+**/node_modules/
+**/dist/
+**/dist-ssr/
+**/.vite/
+**/.cache/
+**/*.tsbuildinfo
+
+# Secrets and machine-local configuration
+**/.env
+**/.env.*
+!**/.env.example
+**/appsettings.Local.json
+**/appsettings.*.Local.json
+**/appsettings.*.local.json
+**/secrets*.json
+**/*service-account*.json
+**/firebase-admin*.json
+**/google-services.json
+**/GoogleService-Info.plist
+**/*.pfx
+**/*.p12
+**/*.jks
+**/*.keystore
+**/*.pem
+**/id_rsa*
+
+# Database backups and local database files; keep the handoff SQL itself
+**/backup_*.sql
+**/*_backup.sql
+**/*.sqlite
+**/*.sqlite3
+**/*.db
+
+# User-uploaded media is private. Only handoff demo covers referenced by
+# NVTDuong_AppReadBook_DB/NoVi_Database.sql are committed.
+**/wwwroot/uploads/*
+!**/wwwroot/uploads/test/
+**/wwwroot/uploads/test/*
+!**/wwwroot/uploads/test/demo-covers/
+!**/wwwroot/uploads/test/demo-covers/*.jpg
+
+# Original working copies of cover art and duplicate root-level images are
+# not needed by the portable handoff; the canonical copies live above.
+/Anh/
+**/ReadBookApi/wwwroot/*.jpg

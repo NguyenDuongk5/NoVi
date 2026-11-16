@@ -1,0 +1,7 @@
+# Ignore private/user uploads, but keep the portable demo covers referenced by
+# NVTDuong_AppReadBook_DB/NoVi_Database.sql.
+ReadBookApi/wwwroot/uploads/*
+!ReadBookApi/wwwroot/uploads/test/
+ReadBookApi/wwwroot/uploads/test/*
+!ReadBookApi/wwwroot/uploads/test/demo-covers/
+!ReadBookApi/wwwroot/uploads/test/demo-covers/*.jpg
