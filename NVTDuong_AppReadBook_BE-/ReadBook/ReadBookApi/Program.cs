@@ -10,6 +10,8 @@ using ReadBookRepo.Novels;
 using ReadBookRepo.Publishing;
 using ReadBookRepo.Media;
 using ReadBookRepo.PersonalReading;
+using ReadBookRepo.Administration;
+using ReadBookRepo.ContentReports;
 using ReadBookApi.Media;
 using ReadBookApi.Controllers.PersonalReading;
 using ReadBookRepo.Base.IRepo;
@@ -30,8 +32,6 @@ using ReadBookService.Service.Chapters;
 using ReadBookService.Service.Home;
 
 var builder = WebApplication.CreateBuilder(args);
-if (builder.Environment.IsDevelopment())
-    builder.Configuration.AddUserSecrets(typeof(Program).Assembly, optional: true);
 
 var connectionString = builder.Configuration.GetConnectionString("Default");
 if (string.IsNullOrWhiteSpace(connectionString))
@@ -100,6 +100,8 @@ builder.Services.AddScoped<INovelRepository, NovelRepository>();
 builder.Services.AddScoped<IPublishingRepository, PublishingRepository>();
 builder.Services.AddScoped<IMediaRepository, MediaRepository>();
 builder.Services.AddScoped<IPersonalReadingRepository, PersonalReadingRepository>();
+builder.Services.AddScoped<IAdministrationRepository, AdministrationRepository>();
+builder.Services.AddScoped<IContentReportRepository, ContentReportRepository>();
 builder.Services.Configure<ReadingOptions>(builder.Configuration.GetSection(ReadingOptions.SectionName));
 builder.Services.Configure<FirebaseOptions>(builder.Configuration.GetSection(FirebaseOptions.SectionName));
 builder.Services.Configure<MediaOptions>(builder.Configuration.GetSection(MediaOptions.SectionName));
@@ -169,6 +171,28 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseAuthentication();
+app.Use(async (context, next) =>
+{
+    if (context.User.Identity?.IsAuthenticated == true)
+    {
+        var idValue = context.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        if (!Guid.TryParse(idValue, out var userId))
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return;
+        }
+        var user = await context.RequestServices.GetRequiredService<IAuthRepository>()
+            .GetByIdAsync(userId, context.RequestAborted);
+        if (user is null || user.Status != 1)
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await context.Response.WriteAsJsonAsync(
+                new { message = "Tài khoản đang bị khóa." }, context.RequestAborted);
+            return;
+        }
+    }
+    await next();
+});
 app.UseAuthorization();
 app.MapControllers();
 app.Run();

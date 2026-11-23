@@ -1,0 +1,27 @@
+<template>
+  <section class="page">
+    <header class="page-header"><div><h1>Thể loại</h1><p class="subtitle">Thể loại ẩn vẫn được giữ trên các truyện đã gắn.</p></div><button class="button primary" @click="openEditor()">Thêm thể loại</button></header>
+    <form class="filters" @submit.prevent="applySearch"><label>Tìm kiếm<input v-model="draftKeyword" placeholder="Tên thể loại" /></label><button class="button primary" :disabled="loading">Tìm</button><button type="button" class="button" :disabled="loading" @click="load">Tải lại</button></form>
+    <div v-if="message" class="notice" :class="{error:messageError}" role="status">{{ message }} <button v-if="messageError" class="link-button" @click="load">Thử lại</button></div>
+    <div class="card">
+      <div v-if="loading&&!items.length" class="empty">Đang tải thể loại…</div><div v-else-if="!items.length" class="empty">Không có thể loại phù hợp.</div>
+      <div v-else class="table-wrap"><table class="data-table"><thead><tr><th>Tên</th><th>Slug</th><th>Số truyện</th><th>Trạng thái</th><th>Thao tác</th></tr></thead>
+        <tbody><tr v-for="item in items" :key="item.categoryId" :data-category-id="item.categoryId"><td><strong>{{ item.name }}</strong></td><td><code>{{ item.slug }}</code></td><td>{{ item.novelCount }}</td><td><span class="status" :class="item.isActive?'approved':'rejected'">{{ item.isActive?'Đang hiện':'Đã ẩn' }}</span></td><td><div class="actions"><button class="button" @click="openEditor(item)">Sửa</button><button class="button" :class="item.isActive?'danger':'primary'" @click="openStatus(item)">{{ item.isActive?'Ẩn':'Hiện' }}</button></div></td></tr></tbody>
+      </table></div><AdminPager :page="page" :page-size="pageSize" :total="total" :busy="loading" @change="changePage" />
+    </div>
+    <div v-if="editor" class="modal-backdrop" @click.self="!submitting&&closeEditor()"><section class="modal compact" role="dialog" aria-modal="true"><h2>{{ editor.item?'Sửa thể loại':'Thêm thể loại' }}</h2><form @submit.prevent="saveCategory"><label class="field">Tên thể loại<input ref="nameInput" v-model="editor.name" :disabled="submitting" maxlength="100" @input="editorError=''" /></label><div v-if="editorError" class="notice error" role="alert">{{ editorError }}</div><div class="actions modal-actions"><button type="button" class="button" :disabled="submitting" @click="closeEditor">Hủy</button><button class="button primary" :disabled="submitting">{{ submitting?'Đang lưu…':'Lưu' }}</button></div></form></section></div>
+    <ConfirmDialog v-if="statusItem" :title="statusItem.isActive?'Ẩn thể loại':'Hiện thể loại'" :message="`${statusItem.isActive?'Ẩn':'Hiện'} thể loại ${statusItem.name}? Các truyện hiện có vẫn giữ liên kết.`" :confirm-label="statusItem.isActive?'Ẩn':'Hiện'" :danger="statusItem.isActive" :busy="submitting" :error="actionError" @close="closeStatus" @confirm="submitStatus" />
+  </section>
+</template>
+<script setup>
+import { nextTick, ref, onMounted } from 'vue'
+import { administrationApi } from '../api/adminApi'; import { apiMessage } from '../services/apiError'
+import AdminPager from '../components/AdminPager.vue'; import ConfirmDialog from '../components/ConfirmDialog.vue'
+const items=ref([]),page=ref(1),pageSize=10,total=ref(0),loading=ref(false),draftKeyword=ref(''),keyword=ref(''),message=ref(''),messageError=ref(false),editor=ref(null),editorError=ref(''),nameInput=ref(null),statusItem=ref(null),submitting=ref(false),actionError=ref('')
+async function load(){loading.value=true;message.value='';try{const {data}=await administrationApi.categories({keyword:keyword.value||undefined,page:page.value,pageSize});items.value=data.items||[];total.value=data.totalItems||0;if(!items.value.length&&page.value>1){page.value--;await load()}}catch(e){message.value=apiMessage(e,'Không tải được thể loại.');messageError.value=true}finally{loading.value=false}}
+function applySearch(){keyword.value=draftKeyword.value;page.value=1;load()} function changePage(v){page.value=v;load()}
+function openEditor(item=null){editor.value={item,name:item?.name||''};editorError.value='';nextTick(()=>nameInput.value?.focus())} function closeEditor(){if(!submitting.value)editor.value=null}
+async function saveCategory(){if(submitting.value)return;if(!editor.value.name.trim()){editorError.value='Vui lòng nhập tên thể loại.';return}submitting.value=true;editorError.value='';try{if(editor.value.item)await administrationApi.updateCategory(editor.value.item.categoryId,editor.value.name);else await administrationApi.createCategory(editor.value.name);const action=editor.value.item?'cập nhật':'thêm';editor.value=null;await load();message.value=`Đã ${action} thể loại thành công.`;messageError.value=false}catch(e){editorError.value=apiMessage(e,'Không lưu được thể loại.')}finally{submitting.value=false}}
+function openStatus(item){statusItem.value=item;actionError.value=''}function closeStatus(){if(!submitting.value)statusItem.value=null}
+async function submitStatus(){if(submitting.value)return;submitting.value=true;actionError.value='';const item=statusItem.value;try{await administrationApi.setCategoryStatus(item.categoryId,!item.isActive);statusItem.value=null;await load();message.value=`Đã ${item.isActive?'ẩn':'hiện'} thể loại ${item.name}.`;messageError.value=false}catch(e){actionError.value=apiMessage(e,'Không cập nhật được thể loại.')}finally{submitting.value=false}}onMounted(load)
+</script>

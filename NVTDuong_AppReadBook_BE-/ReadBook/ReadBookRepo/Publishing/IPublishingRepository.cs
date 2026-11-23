@@ -3,7 +3,8 @@ namespace ReadBookRepo.Publishing;
 public interface IPublishingRepository
 {
     Task<Guid> ApplyForAuthorAsync(Guid userId, CreateAuthorApplication request, CancellationToken ct = default);
-    Task<IReadOnlyList<QueueItem>> GetAuthorApplicationsAsync(CancellationToken ct = default);
+    Task<AuthorApplicationItem?> GetMyAuthorApplicationAsync(Guid userId, CancellationToken ct = default);
+    Task<IReadOnlyList<AuthorApplicationItem>> GetAuthorApplicationsAsync(CancellationToken ct = default);
     Task DecideAuthorApplicationAsync(Guid adminId, Guid applicationId, ModerationRequest request, CancellationToken ct = default);
     Task<IReadOnlyList<OwnedNovel>> GetMyNovelsAsync(Guid userId, CancellationToken ct = default);
     Task<OwnedNovel?> GetMyNovelAsync(Guid userId, Guid novelId, CancellationToken ct = default);
@@ -17,5 +18,6 @@ public interface IPublishingRepository
     Task SetChapterVisibilityAsync(Guid userId, Guid chapterId, bool visible, CancellationToken ct = default);
     Task SoftDeleteChapterAsync(Guid userId, Guid chapterId, CancellationToken ct = default);
     Task<IReadOnlyList<QueueItem>> GetModerationQueueAsync(CancellationToken ct = default);
+    Task<ModerationDetail?> GetModerationDetailAsync(string targetType, Guid targetId, CancellationToken ct = default);
     Task DecideAsync(Guid adminId, string targetType, Guid targetId, ModerationRequest request, CancellationToken ct = default);
 }

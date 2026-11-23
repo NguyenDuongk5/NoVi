@@ -35,7 +35,7 @@ class _RankingScreenState extends State<RankingScreen> {
   int page = 1, total = 0;
   final requestGate = RankingRequestGate();
   bool loading = true, loadingMore = false;
-  String? error;
+  String? error, loadMoreError;
 
   @override
   void initState() {
@@ -68,7 +68,10 @@ class _RankingScreenState extends State<RankingScreen> {
         error = null;
       });
     } else {
-      setState(() => loadingMore = true);
+      setState(() {
+        loadingMore = true;
+        loadMoreError = null;
+      });
     }
     try {
       final response = await widget.session.api.get(
@@ -91,15 +94,21 @@ class _RankingScreenState extends State<RankingScreen> {
         loading = false;
         loadingMore = false;
         error = null;
+        loadMoreError = null;
       });
     } catch (exception) {
       if (!mounted || !requestGate.accepts(mine)) return;
       setState(() {
         loading = false;
         loadingMore = false;
-        error = exception is ApiException
+        final message = exception is ApiException
             ? exception.message
             : 'Không thể tải bảng xếp hạng.';
+        if (reset) {
+          error = message;
+        } else {
+          loadMoreError = message;
+        }
       });
     }
   }
@@ -306,19 +315,26 @@ class _RankingScreenState extends State<RankingScreen> {
           if (index == items.length) {
             return Padding(
               padding: const EdgeInsets.all(16),
-              child: OutlinedButton(
+              child: OutlinedButton.icon(
                 onPressed: loadingMore
                     ? null
                     : () {
-                        page++;
+                        if (loadMoreError == null) page++;
                         load(reset: false);
                       },
-                child: loadingMore
+                icon: loadMoreError != null
+                    ? const Icon(Icons.refresh)
+                    : const Icon(Icons.expand_more),
+                label: loadingMore
                     ? const SizedBox.square(
                         dimension: 20,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                    : const Text('Tải thêm'),
+                    : Text(
+                        loadMoreError == null
+                            ? 'Tải thêm'
+                            : 'Tải lỗi – Thử lại',
+                      ),
               ),
             );
           }

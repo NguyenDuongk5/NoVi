@@ -2,8 +2,19 @@ namespace ReadBookRepo.Novels;
 
 public sealed record NovelListItem(Guid NovelId, string Title, string? OriginalAuthor, string? CoverUrl,
     string? Description, sbyte CompletionStatus, DateTime UpdatedAt, long ViewCount);
-public sealed record NovelDetail(Guid NovelId, string Title, string? OriginalAuthor, string? CoverUrl,
-    string? Description, sbyte CompletionStatus, string DisplayName, long ViewCount, long LibraryCount);
+public sealed class NovelDetail
+{
+    public Guid NovelId { get; init; }
+    public string Title { get; init; } = string.Empty;
+    public string? OriginalAuthor { get; init; }
+    public string? CoverUrl { get; init; }
+    public string? Description { get; init; }
+    public sbyte CompletionStatus { get; init; }
+    public string DisplayName { get; init; } = string.Empty;
+    public long ViewCount { get; init; }
+    public long LibraryCount { get; init; }
+    public IReadOnlyList<PublicCategory> Categories { get; set; } = [];
+}
 public sealed record NovelChapterItem(Guid ChapterId, uint ChapterNumber, string Title, DateTime? PublishedAt);
 public sealed record PublicChapter(Guid ChapterId, Guid NovelId, uint ChapterNumber, string Title, string Content);
 public sealed record PagedNovels(IReadOnlyList<NovelListItem> Items, int Page, int PageSize, long TotalItems);

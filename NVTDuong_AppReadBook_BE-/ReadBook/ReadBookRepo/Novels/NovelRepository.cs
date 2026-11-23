@@ -46,7 +46,17 @@ public sealed class NovelRepository(IConfiguration configuration) : INovelReposi
             WHERE n.novel_id = @NovelId AND n.review_status = 1 AND n.visibility = 0 AND n.deleted_at IS NULL;
             """;
         await using var connection = new MySqlConnection(_connectionString);
-        return await connection.QuerySingleOrDefaultAsync<NovelDetail>(new CommandDefinition(sql, new { NovelId = novelId }, cancellationToken: cancellationToken));
+        var detail = await connection.QuerySingleOrDefaultAsync<NovelDetail>(new CommandDefinition(
+            sql, new { NovelId = novelId }, cancellationToken: cancellationToken));
+        if (detail is null) return null;
+        const string categorySql = """
+            SELECT c.category_id CategoryId,c.name Name,c.slug Slug
+            FROM novel_category nc INNER JOIN category c ON c.category_id=nc.category_id
+            WHERE nc.novel_id=@NovelId ORDER BY c.name
+            """;
+        detail.Categories = (await connection.QueryAsync<PublicCategory>(new CommandDefinition(
+            categorySql, new { NovelId = novelId }, cancellationToken: cancellationToken))).AsList();
+        return detail;
     }
 
     public async Task<IReadOnlyList<NovelChapterItem>> GetPublicChaptersAsync(Guid novelId, CancellationToken cancellationToken = default)

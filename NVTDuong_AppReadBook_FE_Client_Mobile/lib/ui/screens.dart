@@ -7,7 +7,10 @@ import '../core/api.dart';
 import '../core/session.dart';
 import '../core/theme_controller.dart';
 import 'auth_sheet.dart';
+import 'author_application.dart';
+import 'content_report.dart';
 import 'home_widgets.dart';
+import 'publishing.dart';
 import 'ranking_screen.dart';
 import 'ranking_widgets.dart';
 
@@ -274,14 +277,17 @@ class ExplorePage extends StatefulWidget {
 
 class _ExplorePageState extends State<ExplorePage> {
   final search = TextEditingController();
+  Timer? _searchDebounce;
   List<Novel> items = [];
   List<Category> categories = [];
   List<RankedNovel> rankings = [];
   String? category, error;
   String? rankingError;
   int page = 1, total = 0;
+  int searchGeneration = 0;
   int topTab = 0;
-  bool loading = true, rankingLoading = true;
+  bool loading = true, loadingMore = false, rankingLoading = true;
+  String? loadMoreError;
   @override
   void initState() {
     super.initState();
@@ -292,8 +298,20 @@ class _ExplorePageState extends State<ExplorePage> {
 
   @override
   void dispose() {
+    _searchDebounce?.cancel();
     search.dispose();
     super.dispose();
+  }
+
+  void _onSearchChanged(String _) {
+    setState(() {});
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 400), load);
+  }
+
+  void _submitSearch(String _) {
+    _searchDebounce?.cancel();
+    load();
   }
 
   Future<void> loadCategories() async {
@@ -341,11 +359,18 @@ class _ExplorePageState extends State<ExplorePage> {
   }
 
   Future<void> load({bool reset = true}) async {
+    if (!reset && loadingMore) return;
+    final mine = reset ? ++searchGeneration : searchGeneration;
     if (reset) {
       page = 1;
       setState(() {
         loading = true;
         error = null;
+      });
+    } else {
+      setState(() {
+        loadingMore = true;
+        loadMoreError = null;
       });
     }
     try {
@@ -361,18 +386,27 @@ class _ExplorePageState extends State<ExplorePage> {
       final got = (r['items'] as List)
           .map((e) => Novel.from(Map<String, dynamic>.from(e)))
           .toList();
-      if (mounted) {
+      if (mounted && mine == searchGeneration) {
         setState(() {
-          items = reset ? got : [...items, ...got];
+          final combined = reset ? got : [...items, ...got];
+          final seen = <String>{};
+          items = combined.where((novel) => seen.add(novel.id)).toList();
           total = i(r['totalItems']);
           loading = false;
+          loadingMore = false;
+          loadMoreError = null;
         });
       }
     } catch (e) {
-      if (mounted) {
+      if (mounted && mine == searchGeneration) {
         setState(() {
-          error = errorText(e);
           loading = false;
+          loadingMore = false;
+          if (reset) {
+            error = errorText(e);
+          } else {
+            loadMoreError = errorText(e);
+          }
         });
       }
     }
@@ -470,18 +504,21 @@ class _ExplorePageState extends State<ExplorePage> {
                       children: [
                         Expanded(
                           child: SearchBar(
+                            key: const Key('home-search'),
                             controller: search,
                             hintText: 'Tìm truyện, tác giả…',
+                            textInputAction: TextInputAction.search,
                             elevation: const WidgetStatePropertyAll(0),
                             leading: const Icon(Icons.search),
-                            onChanged: (_) => setState(() {}),
-                            onSubmitted: (_) => load(),
+                            onChanged: _onSearchChanged,
+                            onSubmitted: _submitSearch,
                             trailing: search.text.isEmpty
                                 ? null
                                 : [
                                     IconButton(
                                       tooltip: 'Xóa tìm kiếm',
                                       onPressed: () {
+                                        _searchDebounce?.cancel();
                                         search.clear();
                                         load();
                                       },
@@ -587,6 +624,7 @@ class _ExplorePageState extends State<ExplorePage> {
                         itemCount: items.length > 6 ? 6 : items.length,
                         separatorBuilder: (_, _) => const SizedBox(width: 14),
                         itemBuilder: (_, n) => CompactNovelCard(
+                          key: Key('explore-compact-novel-${items[n].id}'),
                           novel: items[n],
                           onTap: () => openNovel(items[n]),
                         ),
@@ -616,6 +654,7 @@ class _ExplorePageState extends State<ExplorePage> {
                       color: Theme.of(context).colorScheme.outlineVariant,
                     ),
                     itemBuilder: (_, n) => NovelListCard(
+                      key: Key('explore-list-novel-${items[n].id}'),
                       novel: items[n],
                       onTap: () => openNovel(items[n]),
                     ),
@@ -625,13 +664,21 @@ class _ExplorePageState extends State<ExplorePage> {
                   SliverPadding(
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
                     sliver: SliverToBoxAdapter(
-                      child: OutlinedButton(
-                        onPressed: () {
-                          page++;
-                          load(reset: false);
-                        },
-                        child: const Text('Xem thêm'),
-                      ),
+                      child: loadingMore
+                          ? const Center(child: CircularProgressIndicator())
+                          : loadMoreError != null
+                          ? OutlinedButton.icon(
+                              onPressed: () => load(reset: false),
+                              icon: const Icon(Icons.refresh),
+                              label: const Text('Tải lỗi – Thử lại'),
+                            )
+                          : OutlinedButton(
+                              onPressed: () {
+                                page++;
+                                load(reset: false);
+                              },
+                              child: const Text('Xem thêm'),
+                            ),
                     ),
                   )
                 else
@@ -722,6 +769,20 @@ class _NovelDetailPageState extends State<NovelDetailPage> {
     }
   }
 
+  Future<void> reportNovel() async {
+    if (!widget.session.authenticated) {
+      await showAuth(context, widget.session);
+      if (!widget.session.authenticated || !mounted) return;
+    }
+    final sent = await showContentReportDialog(context,
+      session: widget.session, targetType: 1, targetId: widget.novelId,
+      targetTitle: novel?.title ?? 'Truyện');
+    if (sent == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Đã gửi báo cáo để quản trị viên xem xét.')));
+    }
+  }
+
   void _snack(Object e) {
     if (mounted) {
       ScaffoldMessenger.of(
@@ -771,6 +832,14 @@ class _NovelDetailPageState extends State<NovelDetailPage> {
         IconButton(
           onPressed: toggle,
           icon: Icon(saved ? Icons.bookmark : Icons.bookmark_border),
+        ),
+        PopupMenuButton<String>(
+          tooltip: 'Tùy chọn',
+          onSelected: (value) { if (value == 'report') reportNovel(); },
+          itemBuilder: (_) => const [
+            PopupMenuItem(value: 'report', child: ListTile(
+              contentPadding: EdgeInsets.zero, leading: Icon(Icons.flag_outlined), title: Text('Báo cáo'))),
+          ],
         ),
       ],
     ),
@@ -822,6 +891,16 @@ class _NovelDetailPageState extends State<NovelDetailPage> {
               ),
               const SizedBox(height: 16),
               Text(novel!.description ?? 'Chưa có mô tả.'),
+              if (novel!.categories.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 6,
+                  children: novel!.categories
+                      .map((category) => Chip(label: Text(category.name)))
+                      .toList(),
+                ),
+              ],
               const SizedBox(height: 12),
               Row(
                 children: [
@@ -1051,6 +1130,21 @@ class _ReaderPageState extends State<ReaderPage> {
     });
   }
 
+  Future<void> reportChapter() async {
+    if (chapter == null) return;
+    if (!widget.session.authenticated) {
+      await showAuth(context, widget.session);
+      if (!widget.session.authenticated || !mounted) return;
+    }
+    final sent = await showContentReportDialog(context,
+      session: widget.session, targetType: 2, targetId: chapter!.id,
+      targetTitle: 'Chương ${chapter!.number}: ${chapter!.title}');
+    if (sent == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Đã gửi báo cáo để quản trị viên xem xét.')));
+    }
+  }
+
   @override
   void dispose() {
     debounce?.cancel();
@@ -1082,6 +1176,12 @@ class _ReaderPageState extends State<ReaderPage> {
           foregroundColor: fg,
           title: Text(chapter?.title ?? 'Đang đọc'),
           actions: [
+            IconButton(
+              key: const Key('report-chapter'),
+              tooltip: 'Báo cáo chương',
+              onPressed: chapter == null ? null : reportChapter,
+              icon: const Icon(Icons.flag_outlined),
+            ),
             PopupMenuButton<int>(
               onSelected: changeReaderSetting,
               itemBuilder: (_) => const [
@@ -1163,15 +1263,27 @@ class _HistoryPageState extends State<HistoryPage>{List<Map<String,dynamic>>item
 abstract class _PagedPrivateState<T extends StatefulWidget> extends State<T> {
   List<Map<String, dynamic>> items = [];
   int page = 1, total = 0;
-  bool loading = true;
-  String? error;
+  int generation = 0;
+  bool loading = true, loadingMore = false;
+  String? error, loadMoreError;
+  final scroll = ScrollController();
   Session get session;
   String get path;
   Map<String, String?> get extraQuery => {};
   Future<void> load({bool reset = true}) async {
+    if (!reset && (loadingMore || items.length >= total)) return;
+    final mine = reset ? ++generation : generation;
     if (reset) {
       page = 1;
-      setState(() => loading = true);
+      setState(() {
+        loading = true;
+        error = null;
+      });
+    } else {
+      setState(() {
+        loadingMore = true;
+        loadMoreError = null;
+      });
     }
     try {
       final r = await session.api.get(
@@ -1182,19 +1294,31 @@ abstract class _PagedPrivateState<T extends StatefulWidget> extends State<T> {
       final got = (r['items'] as List)
           .map((e) => Map<String, dynamic>.from(e))
           .toList();
-      if (mounted) {
+      if (mounted && mine == generation) {
         setState(() {
-          items = reset ? got : [...items, ...got];
+          final combined = reset ? got : [...items, ...got];
+          final seen = <String>{};
+          items = combined.where((x) {
+            final key = s(x['historyId']) ?? s(x['novelId']) ?? x.toString();
+            return seen.add(key);
+          }).toList();
           total = i(r['totalItems']);
           loading = false;
+          loadingMore = false;
           error = null;
+          loadMoreError = null;
         });
       }
     } catch (e) {
-      if (mounted) {
+      if (mounted && mine == generation) {
         setState(() {
           loading = false;
-          error = errorText(e);
+          loadingMore = false;
+          if (reset) {
+            error = errorText(e);
+          } else {
+            loadMoreError = errorText(e);
+          }
         });
       }
     }
@@ -1203,7 +1327,42 @@ abstract class _PagedPrivateState<T extends StatefulWidget> extends State<T> {
   @override
   void initState() {
     super.initState();
+    scroll.addListener(() {
+      if (scroll.position.extentAfter < 240 &&
+          items.length < total &&
+          !loadingMore &&
+          loadMoreError == null) {
+        page++;
+        load(reset: false);
+      }
+    });
     load();
+  }
+
+  @override
+  void dispose() {
+    scroll.dispose();
+    super.dispose();
+  }
+
+  Widget loadMoreFooter() {
+    if (loadingMore) {
+      return const Padding(
+        padding: EdgeInsets.all(16),
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+    if (loadMoreError != null) {
+      return TextButton.icon(
+        onPressed: () => load(reset: false),
+        icon: const Icon(Icons.refresh),
+        label: const Text('Tải thêm lỗi – Thử lại'),
+      );
+    }
+    return const Padding(
+      padding: EdgeInsets.all(16),
+      child: Center(child: Text('Đã tải hết dữ liệu')),
+    );
   }
 }
 
@@ -1231,17 +1390,12 @@ class _LibraryPageState extends _PagedPrivateState<LibraryPage> {
                     ],
                   )
                 : ListView.builder(
+                    controller: scroll,
                     padding: const EdgeInsets.symmetric(horizontal: 16),
                     itemCount: items.length + (items.length < total ? 1 : 0),
                     itemBuilder: (_, n) {
                       if (n == items.length) {
-                        return TextButton(
-                          onPressed: () {
-                            page++;
-                            load(reset: false);
-                          },
-                          child: const Text('Xem thêm'),
-                        );
+                        return loadMoreFooter();
                       }
                       final x = items[n], id = s(x['novelId'])!;
                       final novel = Novel.from(x);
@@ -1304,18 +1458,13 @@ class _HistoryPageState extends _PagedPrivateState<HistoryPage> {
                     ],
                   )
                 : ListView.separated(
+                    controller: scroll,
                     padding: const EdgeInsets.symmetric(horizontal: 16),
                     itemCount: items.length + (items.length < total ? 1 : 0),
                     separatorBuilder: (_, _) => const Divider(height: 1),
                     itemBuilder: (_, n) {
                       if (n == items.length) {
-                        return TextButton(
-                          onPressed: () {
-                            page++;
-                            load(reset: false);
-                          },
-                          child: const Text('Xem thêm'),
-                        );
+                        return loadMoreFooter();
                       }
                       final x = items[n], available = x['available'] == true;
                       return ListTile(
@@ -1419,6 +1568,32 @@ class ProfilePage extends StatelessWidget {
             title: const Text('Sửa hồ sơ'),
             onTap: () => editProfile(context, session),
           ),
+          if (u.role == 0 || u.role == 1)
+            ListTile(
+              key: const Key('profile-author-application'),
+              leading: const Icon(Icons.badge_outlined),
+              title: Text(
+                u.role == 1 ? 'Tài khoản tác giả' : 'Đăng ký làm tác giả',
+              ),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => AuthorApplicationPage(session: session),
+                ),
+              ),
+            ),
+          if (u.role == 1)
+            ListTile(
+              key: const Key('profile-my-novels'),
+              leading: const Icon(Icons.library_books_outlined),
+              title: const Text('Truyện của tôi'),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => MyNovelsPage(session: session),
+                ),
+              ),
+            ),
           _appearanceTile(context),
           ListTile(
             leading: const Icon(Icons.logout),

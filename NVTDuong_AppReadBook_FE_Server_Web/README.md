@@ -1,38 +1,32 @@
-# vue3-app
+# NoVi Web Admin
 
-This template should help get you started developing with Vue 3 in Vite.
+Web Vue 3 dành riêng cho quản trị viên NoVi. Các chức năng đọc truyện và quản lý tác phẩm của tác giả nằm trong ứng dụng Flutter.
 
-## Recommended IDE Setup
+## Chạy local
 
-[VS Code](https://code.visualstudio.com/) + [Vue (Official)](https://marketplace.visualstudio.com/items?itemName=Vue.volar) (and disable Vetur).
+Backend mặc định: `http://localhost:5148`. Có thể đổi bằng biến môi trường Vite:
 
-## Recommended Browser Setup
-
-- Chromium-based browsers (Chrome, Edge, Brave, etc.):
-  - [Vue.js devtools](https://chromewebstore.google.com/detail/vuejs-devtools/nhdogjmejiglipccpnnnanhbledajbpd) 
-  - [Turn on Custom Object Formatter in Chrome DevTools](http://bit.ly/object-formatters)
-- Firefox:
-  - [Vue.js devtools](https://addons.mozilla.org/en-US/firefox/addon/vue-js-devtools/)
-  - [Turn on Custom Object Formatter in Firefox DevTools](https://fxdx.dev/firefox-devtools-custom-object-formatters/)
-
-## Customize configuration
-
-See [Vite Configuration Reference](https://vite.dev/config/).
-
-## Project Setup
-
-```sh
+```powershell
+$env:VITE_API_BASE_URL='http://localhost:5148'
 npm install
-```
-
-### Compile and Hot-Reload for Development
-
-```sh
 npm run dev
 ```
 
-### Compile and Minify for Production
+Mở URL Vite in ra terminal (thường là `http://localhost:5173`). Backend Development cho phép CORS từ localhost.
 
-```sh
+## Chức năng
+
+- Đăng nhập/đăng xuất bằng `POST /api/auth/login`; chỉ chấp nhận `user.role = 2`.
+- Hàng chờ yêu cầu tác giả: `/api/admin/author-applications`.
+- Hàng chờ truyện, chương và revision: `/api/admin/moderation`.
+- Route quản trị được bảo vệ; HTTP 401 xóa phiên local, HTTP 403 được hiển thị theo ngữ cảnh, HTTP 409 tải lại hàng chờ.
+
+Token chỉ được giữ trong local storage của cổng quản trị hiện tại. Không đưa mật khẩu, JWT key hoặc connection string vào `.env` được commit. Khi triển khai production, cấu hình HTTPS và chính sách lưu phiên phù hợp hạ tầng thực tế.
+
+Các route Manga/Chapter/Category prototype cũ không còn được gắn vào router hoặc menu vì backend hiện trả 410 cho quy trình CRUD cũ.
+
+## Build
+
+```powershell
 npm run build
 ```

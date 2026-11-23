@@ -40,6 +40,40 @@ class ApiClient {
       _send('PATCH', path, body: body, auth: auth);
   Future<dynamic> delete(String path, {bool auth = false}) =>
       _send('DELETE', path, auth: auth);
+  Future<dynamic> uploadFile(String path, String filePath) async {
+    final token = tokenProvider?.call();
+    if (token == null) throw ApiException(401, 'Vui lòng đăng nhập.');
+    final request = http.MultipartRequest('POST', _uri(path))
+      ..headers['Accept'] = 'application/json'
+      ..headers['Authorization'] = 'Bearer $token'
+      ..files.add(await http.MultipartFile.fromPath('file', filePath));
+    late final http.Response response;
+    try {
+      response = await http.Response.fromStream(
+        await request.send().timeout(const Duration(seconds: 30)),
+      ).timeout(const Duration(seconds: 30));
+    } on TimeoutException {
+      throw ApiException(0, 'Tải ảnh quá thời gian. Vui lòng thử lại.');
+    } on http.ClientException {
+      throw ApiException(0, 'Không thể kết nối máy chủ.');
+    }
+    if (response.statusCode == 401) await onUnauthorized?.call();
+    dynamic decoded;
+    if (response.bodyBytes.isNotEmpty) {
+      try {
+        decoded = jsonDecode(utf8.decode(response.bodyBytes));
+      } catch (_) {}
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final message = decoded is Map
+          ? (decoded['message'] ?? decoded['detail'] ?? decoded['title'])
+                ?.toString()
+          : null;
+      throw ApiException(response.statusCode, message ?? 'Tải ảnh thất bại.');
+    }
+    return decoded;
+  }
+
   Future<dynamic> _send(
     String method,
     String path, {
@@ -137,12 +171,16 @@ class Novel {
       description = s(j['description']),
       completionStatus = i(j['completionStatus']),
       updatedAt = DateTime.tryParse(s(j['updatedAt']) ?? ''),
-      views = i(j['viewCount']);
+      views = i(j['viewCount']),
+      categories = (j['categories'] as List? ?? const [])
+          .map((e) => Category.from(Map<String, dynamic>.from(e)))
+          .toList();
   final String id, title;
   final String? author, cover, description;
   final int completionStatus;
   final DateTime? updatedAt;
   final int views;
+  final List<Category> categories;
   bool get completed => completionStatus == 1;
 }
 
