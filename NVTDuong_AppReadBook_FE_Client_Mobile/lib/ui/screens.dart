@@ -66,11 +66,16 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> {
   int index = 0;
+  int libraryReloadKey = 0;
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: widget.session,
     builder: (_, _) => Scaffold(
       body: SafeArea(
+key: ValueKey(
+  'library-hub-${widget.session.user?.id}-$libraryReloadKey',
+),
+        
         bottom: false,
         child: <Widget>[
             ExplorePage(
@@ -97,7 +102,12 @@ class _HomeShellState extends State<HomeShell> {
             ),
           NavigationBar(
             selectedIndex: index,
-            onDestinationSelected: (v) => setState(() => index = v),
+            onDestinationSelected: (v) {
+  setState(() {
+    index = v;
+    if (v == 1) libraryReloadKey++;
+  });
+},
             destinations: const [
               NavigationDestination(
                 icon: Icon(Icons.explore_outlined),
@@ -132,64 +142,432 @@ class _HomeShellState extends State<HomeShell> {
         );
 }
 
+
+//thư viện
 class LibraryHubPage extends StatefulWidget {
   const LibraryHubPage({super.key, required this.session});
+
   final Session session;
+
   @override
   State<LibraryHubPage> createState() => _LibraryHubPageState();
 }
 
 class _LibraryHubPageState extends State<LibraryHubPage> {
-  int section = 0;
+  List<Novel> recentReads = [];
+  List<Novel> recentSaved = [];
+  List<Novel> recentlyUpdated = [];
+  List<Map<String, dynamic>> offlineBooks = [];
+
+  bool loading = true;
+  String? error;
 
   @override
-  Widget build(BuildContext context) => Column(
-    children: [
-      Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                'Tủ sách',
-                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.w900,
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  Future<List<Novel>> _loadRecentReads() async {
+    final novelIds = <String>[];
+    final seen = <String>{};
+
+    var page = 1;
+    var total = 0;
+    const pageSize = 50;
+
+    do {
+      final response = await widget.session.api.get(
+        '/api/me/history',
+        query: {'page': '$page', 'pageSize': '$pageSize'},
+        auth: true,
+      );
+
+      total = i(response['totalItems']);
+
+      for (final value in response['items'] as List) {
+        final row = Map<String, dynamic>.from(value);
+
+        if (row['available'] != true) continue;
+
+        final id = s(row['novelId']);
+        if (id != null && seen.add(id)) {
+          novelIds.add(id);
+        }
+
+        if (novelIds.length >= 20) break;
+      }
+
+      page++;
+    } while (novelIds.length < 20 && (page - 1) * pageSize < total);
+
+    final loaded = await Future.wait(
+      novelIds.map((id) async {
+        try {
+          final response = await widget.session.api.get('/api/novels/$id');
+          return Novel.from(Map<String, dynamic>.from(response));
+        } catch (_) {
+          return null;
+        }
+      }),
+    );
+
+    return loaded.whereType<Novel>().toList();
+  }
+
+  Future<List<Novel>> _loadSaved(String sort) async {
+    final response = await widget.session.api.get(
+      '/api/me/library',
+      query: {'page': '1', 'pageSize': '20', 'sort': sort},
+      auth: true,
+    );
+
+    return (response['items'] as List)
+        .map((item) => Novel.from(Map<String, dynamic>.from(item)))
+        .take(20)
+        .toList();
+  }
+
+  Future<void> load() async {
+    setState(() {
+      loading = true;
+      error = null;
+    });
+
+    try {
+      final results = await Future.wait<dynamic>([
+        _loadRecentReads().catchError((_) => <Novel>[]),
+        _loadSaved('saved').catchError((_) => <Novel>[]),
+        _loadSaved('updated').catchError((_) => <Novel>[]),
+        listOfflineNovels(),
+      ]);
+
+
+
+
+// debugPrint('Số truyện offline đọc được: ${(results[3] as List).length}');
+
+
+
+
+
+      if (!mounted) return;
+
+      setState(() {
+        recentReads = results[0] as List<Novel>;
+        recentSaved = results[1] as List<Novel>;
+        recentlyUpdated = results[2] as List<Novel>;
+        offlineBooks = results[3] as List<Map<String, dynamic>>;
+        loading = false;
+      });
+    } catch (exception) {
+      if (!mounted) return;
+
+      setState(() {
+        loading = false;
+        error = errorText(exception);
+      });
+    }
+  }
+
+  Future<void> _openNovel(Novel novel) async {
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => NovelDetailPage(
+          session: widget.session,
+          novelId: novel.id,
+        ),
+      ),
+    );
+
+    if (mounted) load();
+  }
+
+  Future<void> _openHistory() async {
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => HistoryPage(session: widget.session),
+      ),
+    );
+
+    if (mounted) load();
+  }
+
+  Future<void> _openSaved(String sort) async {
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => LibraryPage(
+          session: widget.session,
+          sort: sort,
+        ),
+      ),
+    );
+
+    if (mounted) load();
+  }
+
+  Map<String, dynamic> _toNovelData(Map<String, dynamic> book) => {
+        'novelId': book['novelId'],
+        'title': book['title'],
+        'originalAuthor': book['author'],
+        'coverUrl': book['cover'],
+        'description': book['description'],
+        'completionStatus': 0,
+      };
+
+  Future<void> _openOfflineBook(Map<String, dynamic> book) async {
+    final savedChapters = (book['chapters'] as List? ?? const [])
+        .map((item) => Map<String, dynamic>.from(item as Map))
+        .toList();
+
+    if (savedChapters.isEmpty) return;
+
+    final chapters = savedChapters
+        .map(
+          (item) => ChapterInfo.from({
+            'chapterId': item['id'],
+            'chapterNumber': item['number'],
+            'title': item['title'],
+          }),
+        )
+        .toList();
+
+    final offlineChapterData = <String, Map<String, dynamic>>{
+      for (final item in savedChapters)
+        if (item['id'] != null && item['data'] is Map)
+          item['id'].toString():
+              Map<String, dynamic>.from(item['data'] as Map),
+    };
+
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => OfflineChaptersPage(
+          title: s(book['title']) ?? 'Truyện đã tải',
+          chapters: chapters,
+          onRead: (index) {
+            Navigator.push<void>(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ReaderPage(
+                  session: widget.session,
+                  chapters: chapters,
+                  index: index,
+                  offlineChapterData: offlineChapterData,
+                  offlineNovelTitle: s(book['title']),
                 ),
               ),
-            ),
-            SegmentedButton<int>(
-              segments: const [
-                ButtonSegment(
-                  value: 0,
-                  icon: Icon(Icons.bookmark_outline),
-                  label: Text('Đã lưu'),
-                ),
-                ButtonSegment(
-                  value: 1,
-                  icon: Icon(Icons.history),
-                  label: Text('Lịch sử'),
-                ),
-              ],
-              selected: {section},
-              showSelectedIcon: false,
-              onSelectionChanged: (value) =>
-                  setState(() => section = value.first),
-            ),
-          ],
+            );
+          },
         ),
       ),
-      Expanded(
-        child: IndexedStack(
-          index: section,
+    );
+
+    if (mounted) load();
+  }
+
+  Future<void> _openAllOffline() async {
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => OfflineBooksPage(
+          books: offlineBooks,
+          onOpen: _openOfflineBook,
+          onDelete: _deleteOfflineBook,
+        ),
+      ),
+    );
+
+    if (mounted) load();
+  }
+
+  Future<void> _deleteOfflineBook(Map<String, dynamic> book) async {
+    final id = s(book['novelId']);
+    if (id == null) return;
+
+    await deleteOfflineNovel(id);
+
+    if (mounted) load();
+  }
+
+  Widget _buildShelf({
+    required String title,
+    required List<Novel> novels,
+    required String emptyText,
+    required VoidCallback onSeeAll,
+    ValueChanged<Novel>? onOpen,
+  }) {
+    return SliverPadding(
+      padding: const EdgeInsets.only(bottom: 10),
+      sliver: SliverToBoxAdapter(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            LibraryPage(session: widget.session, embedded: true),
-            HistoryPage(session: widget.session, embedded: true),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                children: [
+                  Expanded(
+  child: Text(
+    title,
+    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+          fontWeight: FontWeight.w800,
+        ),
+  ),
+),
+                  IconButton(
+                    tooltip: 'Xem tất cả $title',
+                    onPressed: onSeeAll,
+                    icon: Icon(
+                      Icons.arrow_forward_rounded,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (novels.isEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+                child: Text(
+                  emptyText,
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              )
+            else
+              SizedBox(
+  height: 208,
+  child: ListView.separated(
+    padding: const EdgeInsets.symmetric(horizontal: 16),
+    scrollDirection: Axis.horizontal,
+    itemCount: novels.length,
+    separatorBuilder: (_, _) => const SizedBox(width: 10),
+    itemBuilder: (context, index) {
+      final novel = novels[index];
+
+      return SizedBox(
+        width: 108,
+        child: InkWell(
+          onTap: () {
+            if (onOpen != null) {
+              onOpen(novel);
+            } else {
+              _openNovel(novel);
+            }
+          },
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              NoviCover(
+                novel.cover,
+                width: 104,
+                height: 138,
+                completed: novel.completed,
+              ),
+              const SizedBox(height: 5),
+              Text(
+                novel.title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                novel.author ?? 'Chưa rõ tác giả',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  ),
+),
           ],
         ),
       ),
-    ],
-  );
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (error != null) {
+      return ErrorRetry(error!, load);
+    }
+
+    final offlineNovels = offlineBooks
+        .map((book) => Novel.from(_toNovelData(book)))
+        .toList();
+
+    final offlineBooksById = {
+      for (final book in offlineBooks)
+        if (s(book['novelId']) != null) s(book['novelId'])!: book,
+    };
+
+    return RefreshIndicator(
+      onRefresh: load,
+      child: CustomScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        slivers: [
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
+            sliver: SliverToBoxAdapter(
+              child: Text(
+                'Tủ truyện',
+                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.w900,
+                    ),
+              ),
+            ),
+          ),
+          _buildShelf(
+            title: 'Đọc gần đây',
+            novels: recentReads,
+            emptyText: 'Truyện bạn đọc gần đây sẽ hiện ở đây.',
+            onSeeAll: _openHistory,
+          ),
+          _buildShelf(
+            title: 'Lưu gần đây',
+            novels: recentSaved,
+            emptyText: 'Truyện bạn lưu sẽ hiện ở đây.',
+            onSeeAll: () => _openSaved('saved'),
+          ),
+          _buildShelf(
+            title: 'Đã lưu mới cập nhật',
+            novels: recentlyUpdated,
+            emptyText: 'Chưa có truyện đã lưu được cập nhật.',
+            onSeeAll: () => _openSaved('updated'),
+          ),
+          _buildShelf(
+            title: 'Tải gần đây · Đọc offline',
+            novels: offlineNovels,
+            emptyText: 'Truyện tải để đọc offline sẽ hiện ở đây.',
+            onSeeAll: _openAllOffline,
+            onOpen: (novel) {
+              final book = offlineBooksById[novel.id];
+              if (book != null) _openOfflineBook(book);
+            },
+          ),
+          const SliverToBoxAdapter(child: SizedBox(height: 24)),
+        ],
+      ),
+    );
+  }
 }
+
 
 class ContinueReadingPanel extends StatefulWidget {
   const ContinueReadingPanel({super.key, required this.session});
@@ -429,6 +807,35 @@ Future<void> loadNextPage() async {
   await load(reset: false);
 }
 
+// Future<void> openNovel(Novel novel) async {
+//   await Navigator.push<void>(
+//     context,
+//     MaterialPageRoute<void>(
+//       builder: (_) => NovelDetailPage(
+//         session: widget.session,
+//         novelId: novel.id,
+//       ),
+//     ),
+//   );
+
+//   try {
+//     final result = await widget.session.api.get(
+//       '/api/novels/${novel.id}',
+//     );
+//     if (!mounted) return;
+
+//     final updated = Novel.from(Map<String, dynamic>.from(result));
+//     final index = items.indexWhere((item) => item.id == novel.id);
+
+//     if (index >= 0) {
+//       setState(() => items[index] = updated);
+//     }
+//   } catch (_) {
+//     // Giữ số hiện tại nếu không tải lại được.
+//   }
+
+//   await loadRankings();
+// }
 Future<void> openNovel(Novel novel) async {
   await Navigator.push<void>(
     context,
@@ -439,26 +846,29 @@ Future<void> openNovel(Novel novel) async {
       ),
     ),
   );
+  if (!mounted) return;
 
-  try {
-    final result = await widget.session.api.get(
-      '/api/novels/${novel.id}',
-    );
-    if (!mounted) return;
-
-    final updated = Novel.from(Map<String, dynamic>.from(result));
-    final index = items.indexWhere((item) => item.id == novel.id);
-
-    if (index >= 0) {
-      setState(() => items[index] = updated);
-    }
-  } catch (_) {
-    // Giữ số hiện tại nếu không tải lại được.
-  }
-
-  await loadRankings();
+  await Future.wait([
+    loadRankings(),
+    _refreshNovelInList(novel.id),
+  ]);
 }
 
+Future<void> _refreshNovelInList(String id) async {
+  try {
+    final result = await widget.session.api.get('/api/novels/$id');
+    if (!mounted) return;
+    final index = items.indexWhere((item) => item.id == id);
+    if (index >= 0) {
+      setState(() => items[index] = Novel.from(Map<String, dynamic>.from(result)));
+    }
+  } catch (_) {}
+}
+
+
+
+
+//
  Future<void> openRankings() async {
   await Navigator.push<void>(
     context,
@@ -1456,11 +1866,15 @@ class ReaderPage extends StatefulWidget {
     required this.chapters,
     required this.index,
     this.restorePercent = 0,
+    this.offlineChapterData,
+this.offlineNovelTitle,
   });
   final Session session;
   final List<ChapterInfo> chapters;
   final int index;
   final double restorePercent;
+  final Map<String, Map<String, dynamic>>? offlineChapterData;
+final String? offlineNovelTitle;
   @override
   State<ReaderPage> createState() => _ReaderPageState();
 }
@@ -1580,14 +1994,17 @@ suppressProgress = true;
       error = null;
     });
     try {
-      final c = ChapterContent.from(
-        Map<String, dynamic>.from(
-          await widget.session.api.get(
-            '/api/novels/chapters/${widget.chapters[index].id}',
-          ),
-        ),
-      );
+      final chapterId = widget.chapters[index].id;
+final raw = widget.offlineChapterData?[chapterId] ??
+    await widget.session.api.get('/api/novels/chapters/$chapterId');
+
+final c = ChapterContent.from(
+  Map<String, dynamic>.from(raw),
+);
       if (mine != generation) return;
+      if (novelTitle == null && widget.offlineNovelTitle != null) {
+  novelTitle = widget.offlineNovelTitle;
+}
       if (novelTitle == null) {
   try {
     final novelData = await widget.session.api.get(
@@ -1596,7 +2013,8 @@ suppressProgress = true;
     novelTitle = s(novelData['title']);
   } catch (_) {}
 }
-      if (widget.session.authenticated) {
+      if (widget.offlineChapterData == null &&
+    widget.session.authenticated) {
         final r = await widget.session.api.post(
           '/api/me/novels/${c.novelId}/chapters/${c.id}/sessions',
           auth: true,
@@ -2479,9 +2897,17 @@ onComments: () {
 }
 
 class LibraryPage extends StatefulWidget {
-  const LibraryPage({super.key, required this.session, this.embedded = false});
+  const LibraryPage({
+    super.key,
+    required this.session,
+    this.embedded = false,
+    this.sort = 'saved',
+  });
+
   final Session session;
   final bool embedded;
+  final String sort;
+
   @override
   State<LibraryPage> createState() => _LibraryPageState();
 }
@@ -2553,10 +2979,18 @@ class _LibraryPageState extends _PagedPrivateState<LibraryPage> {
   @override
   String get path => '/api/me/library';
   @override
-  Map<String, String?> get extraQuery => {'sort': 'saved'};
+  Map<String, String?> get extraQuery => {'sort': widget.sort};
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: widget.embedded ? null : AppBar(title: const Text('Tủ sách')),
+    appBar: widget.embedded
+    ? null
+    : AppBar(
+        title: Text(
+          widget.sort == 'updated'
+              ? 'Đã lưu mới cập nhật'
+              : 'Lưu gần đây',
+        ),
+      ),
     body: loading
         ? const Center(child: CircularProgressIndicator())
         : error != null
@@ -2572,7 +3006,8 @@ class _LibraryPageState extends _PagedPrivateState<LibraryPage> {
                   )
                 : ListView.builder(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
-                    itemCount: items.length + (items.length < total ? 1 : 0),
+                    itemCount: items.length +
+    (widget.sort != 'updated' && items.length < total ? 1 : 0),
                     itemBuilder: (_, n) {
                       if (n == items.length) {
                         return TextButton(
@@ -2621,6 +3056,111 @@ class _LibraryPageState extends _PagedPrivateState<LibraryPage> {
           ),
   );
 }
+
+class OfflineBooksPage extends StatefulWidget {
+  const OfflineBooksPage({
+    super.key,
+    required this.books,
+    required this.onOpen,
+    required this.onDelete,
+  });
+
+  final List<Map<String, dynamic>> books;
+  final ValueChanged<Map<String, dynamic>> onOpen;
+  final Future<void> Function(Map<String, dynamic>) onDelete;
+
+  @override
+  State<OfflineBooksPage> createState() => _OfflineBooksPageState();
+}
+
+class _OfflineBooksPageState extends State<OfflineBooksPage> {
+  late List<Map<String, dynamic>> books;
+
+  @override
+  void initState() {
+    super.initState();
+    books = List.of(widget.books);
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Truyện đã tải · Offline')),
+        body: books.isEmpty
+            ? const Center(child: Text('Chưa có truyện tải xuống.'))
+            : ListView.separated(
+                padding: const EdgeInsets.all(16),
+                itemCount: books.length,
+                separatorBuilder: (_, _) => const Divider(height: 1),
+                itemBuilder: (_, index) {
+                  final book = books[index];
+                  final novel = Novel.from({
+                    'novelId': book['novelId'],
+                    'title': book['title'],
+                    'originalAuthor': book['author'],
+                    'coverUrl': book['cover'],
+                    'completionStatus': 0,
+                  });
+                  final chapterCount =
+                      (book['chapters'] as List? ?? const []).length;
+
+                  return ListTile(
+                    contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                    leading: NoviCover(novel.cover, width: 58, height: 78),
+                    title: Text(
+                      novel.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: Text('$chapterCount chương đã tải'),
+                    trailing: IconButton(
+                      tooltip: 'Xóa bản tải xuống',
+                      icon: const Icon(Icons.delete_outline_rounded),
+                      onPressed: () async {
+                        await widget.onDelete(book);
+                        if (mounted) {
+                          setState(() => books.removeAt(index));
+                        }
+                      },
+                    ),
+                    onTap: () => widget.onOpen(book),
+                  );
+                },
+              ),
+      );
+}
+
+class OfflineChaptersPage extends StatelessWidget {
+  const OfflineChaptersPage({
+    super.key,
+    required this.title,
+    required this.chapters,
+    required this.onRead,
+  });
+
+  final String title;
+  final List<ChapterInfo> chapters;
+  final ValueChanged<int> onRead;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(
+          title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+        ),
+        body: ListView.separated(
+          padding: const EdgeInsets.all(16),
+          itemCount: chapters.length,
+          separatorBuilder: (_, _) => const Divider(height: 1),
+          itemBuilder: (_, index) => ListTile(
+            leading: const Icon(Icons.menu_book_outlined),
+            title: Text(
+              'Chương ${chapters[index].number}: ${chapters[index].title}',
+            ),
+            onTap: () => onRead(index),
+          ),
+        ),
+      );
+}
+
 
 class _HistoryPageState extends _PagedPrivateState<HistoryPage> {
   @override

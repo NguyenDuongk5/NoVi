@@ -179,47 +179,64 @@ class RankingNovelRow extends StatelessWidget {
 }
 
 class RankingPreview extends StatelessWidget {
-  const RankingPreview({super.key, required this.items, required this.onOpen});
+  const RankingPreview({
+    super.key,
+    required this.items,
+    required this.onOpen,
+  });
+
   final List<RankedNovel> items;
   final ValueChanged<RankedNovel> onOpen;
 
   @override
   Widget build(BuildContext context) {
     final groups = <List<RankedNovel>>[];
+
     for (var start = 0; start < items.length; start += 3) {
       groups.add(items.sublist(start, min(start + 3, items.length)));
     }
+
+    // Một đến ba truyện thì chiều cao vừa theo số dòng.
+    // Có nhiều trang thì giữ chiều cao cố định để vuốt ngang.
+    final double previewHeight = groups.length == 1
+        ? (groups.first.length * 96.0 + 8).clamp(104.0, 296.0).toDouble()
+        : 292.0;
+
     return SizedBox(
-      height: 292,
+      height: previewHeight,
       child: PageView.builder(
         padEnds: false,
         controller: PageController(viewportFraction: .94),
         itemCount: groups.length,
-        itemBuilder: (_, page) => Padding(
-          padding: const EdgeInsets.only(right: 12),
-          child: Card(
-            elevation: 0,
-            color: Theme.of(context).colorScheme.surface,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: Column(
-                children: [
-                  for (var index = 0; index < groups[page].length; index++) ...[
-                    Expanded(
-                      child: RankingNovelRow(
-                        item: groups[page][index],
-                        compact: true,
-                        onTap: () => onOpen(groups[page][index]),
+        itemBuilder: (context, page) {
+          final group = groups[page];
+
+          return Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: Card(
+              elevation: 0,
+              color: Theme.of(context).colorScheme.surface,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Column(
+                  children: [
+                    for (var index = 0; index < group.length; index++) ...[
+                      Expanded(
+                        child: RankingNovelRow(
+                          item: group[index],
+                          compact: true,
+                          onTap: () => onOpen(group[index]),
+                        ),
                       ),
-                    ),
-                    if (index + 1 < groups[page].length)
-                      const Divider(height: 1),
+                      if (index + 1 < group.length)
+                        const Divider(height: 1),
+                    ],
                   ],
-                ],
+                ),
               ),
             ),
-          ),
-        ),
+          );
+        },
       ),
     );
   }
