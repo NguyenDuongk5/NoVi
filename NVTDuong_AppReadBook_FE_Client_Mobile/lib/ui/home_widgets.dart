@@ -93,43 +93,76 @@ class NoviCategoryFilter extends StatelessWidget {
   const NoviCategoryFilter({
     super.key,
     required this.categories,
-    required this.selectedId,
+    required this.selectedIds,
     required this.onSelected,
   });
 
   final List<Category> categories;
-  final String? selectedId;
+  final Set<String> selectedIds;
   final ValueChanged<String?> onSelected;
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    return SizedBox(
-      height: 42,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        itemCount: categories.length + 1,
-        separatorBuilder: (_, _) => const SizedBox(width: 8),
-        itemBuilder: (_, index) {
-          final id = index == 0 ? null : categories[index - 1].id;
-          final label = index == 0 ? 'Tất cả' : categories[index - 1].name;
-          final selected = selectedId == id;
-          return ChoiceChip(
-            label: Text(label),
-            selected: selected,
-            onSelected: (_) => onSelected(id),
-            showCheckmark: false,
-            selectedColor: colors.primary,
-            backgroundColor: selected ? colors.primary : colors.surface,
-            labelStyle: TextStyle(
-              color: selected ? colors.onPrimary : colors.onSurfaceVariant,
-              fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-            ),
-            side: BorderSide(color: colors.primary.withValues(alpha: .14)),
-          );
-        },
+    final itemCount = categories.length + 1;
+
+    return GridView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+      itemCount: itemCount,
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        mainAxisExtent: 52,
+        crossAxisSpacing: 10,
+        mainAxisSpacing: 10,
       ),
+      itemBuilder: (context, index) {
+        final id = index == 0 ? null : categories[index - 1].id;
+        final label = index == 0 ? 'Tất cả' : categories[index - 1].name;
+        final selected = id == null ? selectedIds.isEmpty : selectedIds.contains(id);
+
+        return Material(
+          color: selected ? colors.primaryContainer : colors.surface,
+          borderRadius: BorderRadius.circular(14),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(14),
+            onTap: () => onSelected(id),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: selected ? colors.primary : colors.outlineVariant,
+                ),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    selected ? Icons.check_circle : Icons.category_outlined,
+                    size: 19,
+                    color: selected ? colors.primary : colors.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 9),
+                  Expanded(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: selected
+                            ? colors.onPrimaryContainer
+                            : colors.onSurface,
+                        fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -203,122 +236,164 @@ class NoviCover extends StatelessWidget {
 }
 
 class CompactNovelCard extends StatelessWidget {
-  const CompactNovelCard({super.key, required this.novel, required this.onTap});
+  const CompactNovelCard({
+    super.key,
+    required this.novel,
+    required this.onTap,
+  });
 
   final Novel novel;
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) => SizedBox(
-    width: 132,
-    child: InkWell(
-      borderRadius: BorderRadius.circular(12),
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.only(bottom: 4),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            NoviCover(
-              novel.cover,
-              width: 132,
-              height: 176,
-              completed: novel.completed,
-            ),
-            const SizedBox(height: 8),
-            Text(
-              novel.title,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontWeight: FontWeight.w700, height: 1.2),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              novel.author ?? 'Chưa rõ tác giả',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ],
-        ),
-      ),
-    ),
-  );
-}
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
 
-class NovelListCard extends StatelessWidget {
-  const NovelListCard({super.key, required this.novel, required this.onTap});
-
-  final Novel novel;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) => InkWell(
-    onTap: onTap,
-    child: Padding(
-      padding: const EdgeInsets.symmetric(vertical: 14),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          NoviCover(
-            novel.cover,
-            width: 94,
-            height: 126,
-            completed: novel.completed,
+    return SizedBox(
+      width: 148,
+      child: Card(
+        margin: EdgeInsets.zero,
+        elevation: 0,
+        color: colors.surface,
+        clipBehavior: Clip.antiAlias,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: BorderSide(
+            color: colors.outlineVariant.withValues(alpha: .55),
           ),
-          const SizedBox(width: 14),
-          Expanded(
+        ),
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.all(8),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                NoviCover(
+                  novel.cover,
+                  width: 132,
+                  height: 174,
+                  completed: novel.completed,
+                ),
+                const SizedBox(height: 8),
                 Text(
                   novel.title,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  style: const TextStyle(
                     fontWeight: FontWeight.w800,
-                    color: Theme.of(context).colorScheme.onSurface,
+                    height: 1.2,
                   ),
                 ),
-                const SizedBox(height: 5),
+                const Spacer(),
                 Text(
                   novel.author ?? 'Chưa rõ tác giả',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: colors.onSurfaceVariant,
                   ),
-                ),
-                if (novel.description?.trim().isNotEmpty == true) ...[
-                  const SizedBox(height: 7),
-                  Text(
-                    novel.description!,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      height: 1.35,
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 9),
-                Row(
-                  children: [
-                    const Icon(Icons.visibility_outlined, size: 17),
-                    const SizedBox(width: 5),
-                    Text('${novel.views} lượt đọc'),
-                  ],
                 ),
               ],
             ),
           ),
-          Icon(
-            Icons.chevron_right,
-            color: Theme.of(context).colorScheme.onSurfaceVariant,
-          ),
-        ],
+        ),
       ),
-    ),
+    );
+  }
+}
+
+class NovelListCard extends StatelessWidget {
+  const NovelListCard({
+    super.key,
+    required this.novel,
+    required this.onTap,
+  });
+
+  final Novel novel;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final compact = constraints.maxWidth < 360;
+
+      return InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 14),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              NoviCover(
+                novel.cover,
+                width: compact ? 64 : 94,
+                height: compact ? 90 : 126,
+                completed: novel.completed,
+              ),
+              SizedBox(width: compact ? 8 : 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      novel.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w800,
+                        color: Theme.of(context).colorScheme.onSurface,
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      novel.author ?? 'Chưa rõ tác giả',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    if (!compact &&
+                        novel.description?.trim().isNotEmpty == true) ...[
+                      const SizedBox(height: 7),
+                      Text(
+                        novel.description!,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          height: 1.35,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 9),
+                    Row(
+                      children: [
+                        const Icon(Icons.visibility_outlined, size: 17),
+                        const SizedBox(width: 5),
+                        Flexible(
+                          child: Text(
+                            '${novel.views} lượt xem',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              if (!compact)
+                Icon(
+                  Icons.chevron_right,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+            ],
+          ),
+        ),
+      );
+    },
   );
 }
 
@@ -339,45 +414,53 @@ class ContinueReadingBar extends StatelessWidget {
   final VoidCallback onClose;
 
   @override
-  Widget build(BuildContext context) => Material(
-    color: Theme.of(context).colorScheme.surfaceContainerHighest,
-    elevation: 5,
-    child: SafeArea(
-      top: false,
-      bottom: false,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
-        child: Row(
-          children: [
-            NoviCover(coverUrl, width: 42, height: 54),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontWeight: FontWeight.w700),
-                  ),
-                  Text(
-                    chapter,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ],
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+    child: Material(
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      elevation: 2,
+      borderRadius: BorderRadius.circular(18),
+      child: SafeArea(
+        top: false,
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(10, 8, 6, 8),
+          child: Row(
+            children: [
+              NoviCover(coverUrl, width: 42, height: 54),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                    Text(
+                      chapter,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
               ),
-            ),
-            FilledButton(onPressed: onContinue, child: const Text('Đọc tiếp')),
-            IconButton(
-              tooltip: 'Ẩn',
-              onPressed: onClose,
-              icon: const Icon(Icons.close, size: 20),
-            ),
-          ],
+              const SizedBox(width: 8),
+              FilledButton.tonal(
+                onPressed: onContinue,
+                child: const Text('Đọc tiếp'),
+              ),
+              IconButton(
+                tooltip: 'Ẩn',
+                onPressed: onClose,
+                icon: const Icon(Icons.close, size: 20),
+              ),
+            ],
+          ),
         ),
       ),
     ),

@@ -20,7 +20,7 @@ class RankingScreen extends StatefulWidget {
   });
 
   final Session session;
-  final void Function(BuildContext context, String novelId) onOpenNovel;
+final Future<void> Function(BuildContext context, String novelId) onOpenNovel;
   final String initialPeriod;
 
   @override
@@ -341,7 +341,10 @@ class _RankingScreenState extends State<RankingScreen> {
           final item = items[index];
           return RankingNovelRow(
             item: item,
-            onTap: () => widget.onOpenNovel(context, item.novel.id),
+            onTap: () async {
+  await widget.onOpenNovel(context, item.novel.id);
+  if (mounted) await load();
+},
           );
         },
       ),

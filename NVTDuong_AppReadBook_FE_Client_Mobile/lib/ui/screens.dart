@@ -2,17 +2,27 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-
+import 'package:flutter/services.dart';
 import '../core/api.dart';
 import '../core/session.dart';
 import '../core/theme_controller.dart';
 import 'auth_sheet.dart';
 import 'author_application.dart';
 import 'content_report.dart';
-import 'home_widgets.dart';
 import 'publishing.dart';
+import 'home_widgets.dart';
 import 'ranking_screen.dart';
 import 'ranking_widgets.dart';
+import 'reader_toolbar.dart';
+import 'reader_settings_page.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'offline_book_store.dart';
+import 'reader_audio_controls.dart';
+
+// import 'package:google_fonts/google_fonts.dart';
+import 'package:flutter/foundation.dart'
+    show defaultTargetPlatform, TargetPlatform, kIsWeb;
+
 
 String errorText(Object e) =>
     e is ApiException ? e.message : 'Không thể kết nối máy chủ.';
@@ -56,14 +66,23 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> {
   int index = 0;
+  int libraryReloadKey = 0;
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: widget.session,
     builder: (_, _) => Scaffold(
       body: SafeArea(
+key: ValueKey(
+  'library-hub-${widget.session.user?.id}-$libraryReloadKey',
+),
+        
         bottom: false,
         child: <Widget>[
-          ExplorePage(session: widget.session),
+            ExplorePage(
+              session: widget.session,
+              onProfileTap: () => setState(() => index = 2),
+            ),
+
           _authGate(
             LibraryHubPage(
               key: ValueKey('library-hub-${widget.session.user?.id}'),
@@ -83,7 +102,12 @@ class _HomeShellState extends State<HomeShell> {
             ),
           NavigationBar(
             selectedIndex: index,
-            onDestinationSelected: (v) => setState(() => index = v),
+            onDestinationSelected: (v) {
+  setState(() {
+    index = v;
+    if (v == 1) libraryReloadKey++;
+  });
+},
             destinations: const [
               NavigationDestination(
                 icon: Icon(Icons.explore_outlined),
@@ -118,64 +142,432 @@ class _HomeShellState extends State<HomeShell> {
         );
 }
 
+
+//thư viện
 class LibraryHubPage extends StatefulWidget {
   const LibraryHubPage({super.key, required this.session});
+
   final Session session;
+
   @override
   State<LibraryHubPage> createState() => _LibraryHubPageState();
 }
 
 class _LibraryHubPageState extends State<LibraryHubPage> {
-  int section = 0;
+  List<Novel> recentReads = [];
+  List<Novel> recentSaved = [];
+  List<Novel> recentlyUpdated = [];
+  List<Map<String, dynamic>> offlineBooks = [];
+
+  bool loading = true;
+  String? error;
 
   @override
-  Widget build(BuildContext context) => Column(
-    children: [
-      Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                'Tủ sách',
-                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.w900,
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  Future<List<Novel>> _loadRecentReads() async {
+    final novelIds = <String>[];
+    final seen = <String>{};
+
+    var page = 1;
+    var total = 0;
+    const pageSize = 50;
+
+    do {
+      final response = await widget.session.api.get(
+        '/api/me/history',
+        query: {'page': '$page', 'pageSize': '$pageSize'},
+        auth: true,
+      );
+
+      total = i(response['totalItems']);
+
+      for (final value in response['items'] as List) {
+        final row = Map<String, dynamic>.from(value);
+
+        if (row['available'] != true) continue;
+
+        final id = s(row['novelId']);
+        if (id != null && seen.add(id)) {
+          novelIds.add(id);
+        }
+
+        if (novelIds.length >= 20) break;
+      }
+
+      page++;
+    } while (novelIds.length < 20 && (page - 1) * pageSize < total);
+
+    final loaded = await Future.wait(
+      novelIds.map((id) async {
+        try {
+          final response = await widget.session.api.get('/api/novels/$id');
+          return Novel.from(Map<String, dynamic>.from(response));
+        } catch (_) {
+          return null;
+        }
+      }),
+    );
+
+    return loaded.whereType<Novel>().toList();
+  }
+
+  Future<List<Novel>> _loadSaved(String sort) async {
+    final response = await widget.session.api.get(
+      '/api/me/library',
+      query: {'page': '1', 'pageSize': '20', 'sort': sort},
+      auth: true,
+    );
+
+    return (response['items'] as List)
+        .map((item) => Novel.from(Map<String, dynamic>.from(item)))
+        .take(20)
+        .toList();
+  }
+
+  Future<void> load() async {
+    setState(() {
+      loading = true;
+      error = null;
+    });
+
+    try {
+      final results = await Future.wait<dynamic>([
+        _loadRecentReads().catchError((_) => <Novel>[]),
+        _loadSaved('saved').catchError((_) => <Novel>[]),
+        _loadSaved('updated').catchError((_) => <Novel>[]),
+        listOfflineNovels(),
+      ]);
+
+
+
+
+// debugPrint('Số truyện offline đọc được: ${(results[3] as List).length}');
+
+
+
+
+
+      if (!mounted) return;
+
+      setState(() {
+        recentReads = results[0] as List<Novel>;
+        recentSaved = results[1] as List<Novel>;
+        recentlyUpdated = results[2] as List<Novel>;
+        offlineBooks = results[3] as List<Map<String, dynamic>>;
+        loading = false;
+      });
+    } catch (exception) {
+      if (!mounted) return;
+
+      setState(() {
+        loading = false;
+        error = errorText(exception);
+      });
+    }
+  }
+
+  Future<void> _openNovel(Novel novel) async {
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => NovelDetailPage(
+          session: widget.session,
+          novelId: novel.id,
+        ),
+      ),
+    );
+
+    if (mounted) load();
+  }
+
+  Future<void> _openHistory() async {
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => HistoryPage(session: widget.session),
+      ),
+    );
+
+    if (mounted) load();
+  }
+
+  Future<void> _openSaved(String sort) async {
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => LibraryPage(
+          session: widget.session,
+          sort: sort,
+        ),
+      ),
+    );
+
+    if (mounted) load();
+  }
+
+  Map<String, dynamic> _toNovelData(Map<String, dynamic> book) => {
+        'novelId': book['novelId'],
+        'title': book['title'],
+        'originalAuthor': book['author'],
+        'coverUrl': book['cover'],
+        'description': book['description'],
+        'completionStatus': 0,
+      };
+
+  Future<void> _openOfflineBook(Map<String, dynamic> book) async {
+    final savedChapters = (book['chapters'] as List? ?? const [])
+        .map((item) => Map<String, dynamic>.from(item as Map))
+        .toList();
+
+    if (savedChapters.isEmpty) return;
+
+    final chapters = savedChapters
+        .map(
+          (item) => ChapterInfo.from({
+            'chapterId': item['id'],
+            'chapterNumber': item['number'],
+            'title': item['title'],
+          }),
+        )
+        .toList();
+
+    final offlineChapterData = <String, Map<String, dynamic>>{
+      for (final item in savedChapters)
+        if (item['id'] != null && item['data'] is Map)
+          item['id'].toString():
+              Map<String, dynamic>.from(item['data'] as Map),
+    };
+
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => OfflineChaptersPage(
+          title: s(book['title']) ?? 'Truyện đã tải',
+          chapters: chapters,
+          onRead: (index) {
+            Navigator.push<void>(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ReaderPage(
+                  session: widget.session,
+                  chapters: chapters,
+                  index: index,
+                  offlineChapterData: offlineChapterData,
+                  offlineNovelTitle: s(book['title']),
                 ),
               ),
-            ),
-            SegmentedButton<int>(
-              segments: const [
-                ButtonSegment(
-                  value: 0,
-                  icon: Icon(Icons.bookmark_outline),
-                  label: Text('Đã lưu'),
-                ),
-                ButtonSegment(
-                  value: 1,
-                  icon: Icon(Icons.history),
-                  label: Text('Lịch sử'),
-                ),
-              ],
-              selected: {section},
-              showSelectedIcon: false,
-              onSelectionChanged: (value) =>
-                  setState(() => section = value.first),
-            ),
-          ],
+            );
+          },
         ),
       ),
-      Expanded(
-        child: IndexedStack(
-          index: section,
+    );
+
+    if (mounted) load();
+  }
+
+  Future<void> _openAllOffline() async {
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => OfflineBooksPage(
+          books: offlineBooks,
+          onOpen: _openOfflineBook,
+          onDelete: _deleteOfflineBook,
+        ),
+      ),
+    );
+
+    if (mounted) load();
+  }
+
+  Future<void> _deleteOfflineBook(Map<String, dynamic> book) async {
+    final id = s(book['novelId']);
+    if (id == null) return;
+
+    await deleteOfflineNovel(id);
+
+    if (mounted) load();
+  }
+
+  Widget _buildShelf({
+    required String title,
+    required List<Novel> novels,
+    required String emptyText,
+    required VoidCallback onSeeAll,
+    ValueChanged<Novel>? onOpen,
+  }) {
+    return SliverPadding(
+      padding: const EdgeInsets.only(bottom: 10),
+      sliver: SliverToBoxAdapter(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            LibraryPage(session: widget.session, embedded: true),
-            HistoryPage(session: widget.session, embedded: true),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                children: [
+                  Expanded(
+  child: Text(
+    title,
+    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+          fontWeight: FontWeight.w800,
+        ),
+  ),
+),
+                  IconButton(
+                    tooltip: 'Xem tất cả $title',
+                    onPressed: onSeeAll,
+                    icon: Icon(
+                      Icons.arrow_forward_rounded,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (novels.isEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+                child: Text(
+                  emptyText,
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              )
+            else
+              SizedBox(
+  height: 208,
+  child: ListView.separated(
+    padding: const EdgeInsets.symmetric(horizontal: 16),
+    scrollDirection: Axis.horizontal,
+    itemCount: novels.length,
+    separatorBuilder: (_, _) => const SizedBox(width: 10),
+    itemBuilder: (context, index) {
+      final novel = novels[index];
+
+      return SizedBox(
+        width: 108,
+        child: InkWell(
+          onTap: () {
+            if (onOpen != null) {
+              onOpen(novel);
+            } else {
+              _openNovel(novel);
+            }
+          },
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              NoviCover(
+                novel.cover,
+                width: 104,
+                height: 138,
+                completed: novel.completed,
+              ),
+              const SizedBox(height: 5),
+              Text(
+                novel.title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                novel.author ?? 'Chưa rõ tác giả',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  ),
+),
           ],
         ),
       ),
-    ],
-  );
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (error != null) {
+      return ErrorRetry(error!, load);
+    }
+
+    final offlineNovels = offlineBooks
+        .map((book) => Novel.from(_toNovelData(book)))
+        .toList();
+
+    final offlineBooksById = {
+      for (final book in offlineBooks)
+        if (s(book['novelId']) != null) s(book['novelId'])!: book,
+    };
+
+    return RefreshIndicator(
+      onRefresh: load,
+      child: CustomScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        slivers: [
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
+            sliver: SliverToBoxAdapter(
+              child: Text(
+                'Tủ truyện',
+                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.w900,
+                    ),
+              ),
+            ),
+          ),
+          _buildShelf(
+            title: 'Đọc gần đây',
+            novels: recentReads,
+            emptyText: 'Truyện bạn đọc gần đây sẽ hiện ở đây.',
+            onSeeAll: _openHistory,
+          ),
+          _buildShelf(
+            title: 'Lưu gần đây',
+            novels: recentSaved,
+            emptyText: 'Truyện bạn lưu sẽ hiện ở đây.',
+            onSeeAll: () => _openSaved('saved'),
+          ),
+          _buildShelf(
+            title: 'Đã lưu mới cập nhật',
+            novels: recentlyUpdated,
+            emptyText: 'Chưa có truyện đã lưu được cập nhật.',
+            onSeeAll: () => _openSaved('updated'),
+          ),
+          _buildShelf(
+            title: 'Tải gần đây · Đọc offline',
+            novels: offlineNovels,
+            emptyText: 'Truyện tải để đọc offline sẽ hiện ở đây.',
+            onSeeAll: _openAllOffline,
+            onOpen: (novel) {
+              final book = offlineBooksById[novel.id];
+              if (book != null) _openOfflineBook(book);
+            },
+          ),
+          const SliverToBoxAdapter(child: SizedBox(height: 24)),
+        ],
+      ),
+    );
+  }
 }
+
 
 class ContinueReadingPanel extends StatefulWidget {
   const ContinueReadingPanel({super.key, required this.session});
@@ -269,24 +661,31 @@ class _ContinueReadingPanelState extends State<ContinueReadingPanel> {
 }
 
 class ExplorePage extends StatefulWidget {
-  const ExplorePage({super.key, required this.session});
+  const ExplorePage({
+    super.key,
+    required this.session,
+    this.onProfileTap,
+  });
+
   final Session session;
+  final VoidCallback? onProfileTap;
+
   @override
   State<ExplorePage> createState() => _ExplorePageState();
 }
 
 class _ExplorePageState extends State<ExplorePage> {
   final search = TextEditingController();
-  Timer? _searchDebounce;
   List<Novel> items = [];
   List<Category> categories = [];
   List<RankedNovel> rankings = [];
-  String? category, error;
+  final Set<String> selectedCategoryIds = {};
+  String? error;
   String? rankingError;
   int page = 1, total = 0;
-  int searchGeneration = 0;
   int topTab = 0;
-  bool loading = true, loadingMore = false, rankingLoading = true;
+  bool loading = true, rankingLoading = true;
+  bool loadingMore = false;
   String? loadMoreError;
   @override
   void initState() {
@@ -298,20 +697,8 @@ class _ExplorePageState extends State<ExplorePage> {
 
   @override
   void dispose() {
-    _searchDebounce?.cancel();
     search.dispose();
     super.dispose();
-  }
-
-  void _onSearchChanged(String _) {
-    setState(() {});
-    _searchDebounce?.cancel();
-    _searchDebounce = Timer(const Duration(milliseconds: 400), load);
-  }
-
-  void _submitSearch(String _) {
-    _searchDebounce?.cancel();
-    load();
   }
 
   Future<void> loadCategories() async {
@@ -358,87 +745,165 @@ class _ExplorePageState extends State<ExplorePage> {
     await Future.wait([load(), loadRankings(), loadCategories()]);
   }
 
-  Future<void> load({bool reset = true}) async {
-    if (!reset && loadingMore) return;
-    final mine = reset ? ++searchGeneration : searchGeneration;
-    if (reset) {
-      page = 1;
-      setState(() {
-        loading = true;
-        error = null;
-      });
-    } else {
-      setState(() {
-        loadingMore = true;
-        loadMoreError = null;
-      });
-    }
-    try {
-      final r = await widget.session.api.get(
-        '/api/novels',
-        query: {
-          'keyword': search.text.trim().isEmpty ? null : search.text.trim(),
-          'categoryId': category,
-          'page': '$page',
-          'pageSize': '12',
-        },
-      );
-      final got = (r['items'] as List)
-          .map((e) => Novel.from(Map<String, dynamic>.from(e)))
-          .toList();
-      if (mounted && mine == searchGeneration) {
-        setState(() {
-          final combined = reset ? got : [...items, ...got];
-          final seen = <String>{};
-          items = combined.where((novel) => seen.add(novel.id)).toList();
-          total = i(r['totalItems']);
-          loading = false;
-          loadingMore = false;
-          loadMoreError = null;
-        });
-      }
-    } catch (e) {
-      if (mounted && mine == searchGeneration) {
-        setState(() {
-          loading = false;
-          loadingMore = false;
-          if (reset) {
-            error = errorText(e);
-          } else {
-            loadMoreError = errorText(e);
-          }
-        });
-      }
-    }
+Future<void> load({bool reset = true}) async {
+  final requestedPage = reset ? 1 : page + 1;
+
+  if (reset) {
+    setState(() {
+      loading = true;
+      error = null;
+      loadMoreError = null;
+    });
   }
 
-  void openNovel(Novel novel) => Navigator.push(
+  try {
+    final r = await widget.session.api.get(
+      '/api/novels',
+      query: {
+        'keyword': search.text.trim().isEmpty ? null : search.text.trim(),
+        'categoryId': selectedCategoryIds.isEmpty ? null : selectedCategoryIds.first,
+        'page': '$requestedPage',
+        'pageSize': '12',
+      },
+    );
+
+    final got = (r['items'] as List)
+        .map((e) => Novel.from(Map<String, dynamic>.from(e)))
+        .toList();
+
+    if (!mounted) return;
+
+    setState(() {
+      page = requestedPage;
+      items = reset ? got : [...items, ...got];
+      total = i(r['totalItems']);
+      loading = false;
+      loadingMore = false;
+      loadMoreError = null;
+    });
+  } catch (e) {
+    if (!mounted) return;
+
+    setState(() {
+      if (reset) {
+        error = errorText(e);
+        loading = false;
+      } else {
+        loadMoreError = errorText(e);
+        loadingMore = false;
+      }
+    });
+  }
+}
+
+Future<void> loadNextPage() async {
+  if (loading || loadingMore || items.length >= total) return;
+
+  setState(() {
+    loadingMore = true;
+    loadMoreError = null;
+  });
+
+  await load(reset: false);
+}
+
+// Future<void> openNovel(Novel novel) async {
+//   await Navigator.push<void>(
+//     context,
+//     MaterialPageRoute<void>(
+//       builder: (_) => NovelDetailPage(
+//         session: widget.session,
+//         novelId: novel.id,
+//       ),
+//     ),
+//   );
+
+//   try {
+//     final result = await widget.session.api.get(
+//       '/api/novels/${novel.id}',
+//     );
+//     if (!mounted) return;
+
+//     final updated = Novel.from(Map<String, dynamic>.from(result));
+//     final index = items.indexWhere((item) => item.id == novel.id);
+
+//     if (index >= 0) {
+//       setState(() => items[index] = updated);
+//     }
+//   } catch (_) {
+//     // Giữ số hiện tại nếu không tải lại được.
+//   }
+
+//   await loadRankings();
+// }
+Future<void> openNovel(Novel novel) async {
+  await Navigator.push<void>(
     context,
-    MaterialPageRoute(
-      builder: (_) =>
-          NovelDetailPage(session: widget.session, novelId: novel.id),
+    MaterialPageRoute<void>(
+      builder: (_) => NovelDetailPage(
+        session: widget.session,
+        novelId: novel.id,
+      ),
     ),
   );
+  if (!mounted) return;
 
-  void openRankings() => Navigator.push(
+  await Future.wait([
+    loadRankings(),
+    _refreshNovelInList(novel.id),
+  ]);
+}
+
+Future<void> _refreshNovelInList(String id) async {
+  try {
+    final result = await widget.session.api.get('/api/novels/$id');
+    if (!mounted) return;
+    final index = items.indexWhere((item) => item.id == id);
+    if (index >= 0) {
+      setState(() => items[index] = Novel.from(Map<String, dynamic>.from(result)));
+    }
+  } catch (_) {}
+}
+
+
+
+
+//
+ Future<void> openRankings() async {
+  await Navigator.push<void>(
     context,
-    MaterialPageRoute(
+    MaterialPageRoute<void>(
       builder: (_) => RankingScreen(
         session: widget.session,
-        onOpenNovel: (rankingContext, novelId) => Navigator.push(
-          rankingContext,
-          MaterialPageRoute(
-            builder: (_) =>
-                NovelDetailPage(session: widget.session, novelId: novelId),
-          ),
-        ),
+        onOpenNovel: (rankingContext, novelId) async {
+          await Navigator.push<void>(
+            rankingContext,
+            MaterialPageRoute<void>(
+              builder: (_) => NovelDetailPage(
+                session: widget.session,
+                novelId: novelId,
+              ),
+            ),
+          );
+        },
       ),
     ),
   );
 
+  if (mounted) await loadRankings();
+}
+
   @override
   Widget build(BuildContext context) => Scaffold(
-    body: Center(
+    body: NotificationListener<ScrollNotification>(
+  onNotification: (notification) {
+    if (notification.metrics.axis == Axis.vertical &&
+        notification.metrics.extentAfter < 500) {
+      loadNextPage();
+    }
+    return false;
+  },
+  child: Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 760),
         child: RefreshIndicator(
@@ -450,51 +915,77 @@ class _ExplorePageState extends State<ExplorePage> {
                 sliver: SliverList.list(
                   children: [
                     Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            'NoVi',
-                            style: Theme.of(context).textTheme.headlineMedium
-                                ?.copyWith(
-                                  color: Theme.of(context).colorScheme.primary,
-                                  fontWeight: FontWeight.w900,
+                        children: [
+                          Container(
+                            width: 46,
+                            height: 46,
+                            decoration: BoxDecoration(
+                              color: Theme.of(context).colorScheme.primaryContainer,
+                              borderRadius: BorderRadius.circular(15),
+                            ),
+                            child: Icon(
+                              Icons.auto_stories_rounded,
+                              color: Theme.of(context).colorScheme.primary,
+                              size: 25,
+                            ),
+                          ),
+                          const SizedBox(width: 11),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'NoVi',
+                                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                                    color: Theme.of(context).colorScheme.primary,
+                                    fontWeight: FontWeight.w900,
+                                    height: 1.05,
+                                  ),
                                 ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  widget.session.user == null
+                                      ? 'Chào bạn, hôm nay mình đọc gì?'
+                                      : 'Chào ${widget.session.user!.displayName ?? widget.session.user!.fullName}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
-                        ),
-                        IconButton(
-                          tooltip:
+                          IconButton(
+                            tooltip: Theme.of(context).brightness == Brightness.dark
+                                ? 'Chuyển sang giao diện sáng'
+                                : 'Chuyển sang giao diện tối',
+                            onPressed: () => NoviThemeController.instance.toggle(
+                              Theme.of(context).brightness,
+                            ),
+                            icon: Icon(
                               Theme.of(context).brightness == Brightness.dark
-                              ? 'Chuyển sang giao diện sáng'
-                              : 'Chuyển sang giao diện tối',
-                          onPressed: () => NoviThemeController.instance.toggle(
-                            Theme.of(context).brightness,
+                                  ? Icons.light_mode_outlined
+                                  : Icons.dark_mode_outlined,
+                            ),
                           ),
-                          icon: Icon(
-                            Theme.of(context).brightness == Brightness.dark
-                                ? Icons.light_mode_outlined
-                                : Icons.dark_mode_outlined,
+                          const SizedBox(width: 2),
+                          IconButton.filledTonal(
+                            tooltip: 'Hồ sơ cá nhân',
+                            onPressed: widget.onProfileTap,
+                            icon: const Icon(Icons.person_outline_rounded),
                           ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      widget.session.user == null
-                          ? 'Chào bạn, hôm nay mình đọc gì?'
-                          : 'Chào ${widget.session.user!.displayName ?? widget.session.user!.fullName}',
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ],
                       ),
-                    ),
-                    const SizedBox(height: 10),
+                      const SizedBox(height: 16),
                     NoviTopTabs(
                       labels: const ['Khám phá', 'Thể loại'],
                       selectedIndex: topTab,
                       onSelected: (value) {
                         if (value == topTab) return;
                         setState(() => topTab = value);
-                        if (value == 0 && category != null) {
-                          category = null;
+                        if (value == 0 && selectedCategoryIds.isNotEmpty) {
+                          selectedCategoryIds.clear();
                           load();
                         }
                       },
@@ -504,21 +995,18 @@ class _ExplorePageState extends State<ExplorePage> {
                       children: [
                         Expanded(
                           child: SearchBar(
-                            key: const Key('home-search'),
                             controller: search,
                             hintText: 'Tìm truyện, tác giả…',
-                            textInputAction: TextInputAction.search,
                             elevation: const WidgetStatePropertyAll(0),
                             leading: const Icon(Icons.search),
-                            onChanged: _onSearchChanged,
-                            onSubmitted: _submitSearch,
+                            onChanged: (_) => setState(() {}),
+                            onSubmitted: (_) => load(),
                             trailing: search.text.isEmpty
                                 ? null
                                 : [
                                     IconButton(
                                       tooltip: 'Xóa tìm kiếm',
                                       onPressed: () {
-                                        _searchDebounce?.cancel();
                                         search.clear();
                                         load();
                                       },
@@ -546,9 +1034,12 @@ class _ExplorePageState extends State<ExplorePage> {
                 SliverToBoxAdapter(
                   child: NoviCategoryFilter(
                     categories: categories,
-                    selectedId: category,
-                    onSelected: (value) {
-                      category = value;
+                    selectedIds: selectedCategoryIds,
+                    onSelected: (id) {
+                      setState(() {
+                        selectedCategoryIds.clear();
+                        if (id != null) selectedCategoryIds.add(id);
+                      });
                       load();
                     },
                   ),
@@ -617,14 +1108,13 @@ class _ExplorePageState extends State<ExplorePage> {
                   ),
                   SliverToBoxAdapter(
                     child: SizedBox(
-                      height: 246,
+                      height: 270,
                       child: ListView.separated(
                         padding: const EdgeInsets.symmetric(horizontal: 16),
                         scrollDirection: Axis.horizontal,
                         itemCount: items.length > 6 ? 6 : items.length,
                         separatorBuilder: (_, _) => const SizedBox(width: 14),
                         itemBuilder: (_, n) => CompactNovelCard(
-                          key: Key('explore-compact-novel-${items[n].id}'),
                           novel: items[n],
                           onTap: () => openNovel(items[n]),
                         ),
@@ -654,7 +1144,6 @@ class _ExplorePageState extends State<ExplorePage> {
                       color: Theme.of(context).colorScheme.outlineVariant,
                     ),
                     itemBuilder: (_, n) => NovelListCard(
-                      key: Key('explore-list-novel-${items[n].id}'),
                       novel: items[n],
                       onTap: () => openNovel(items[n]),
                     ),
@@ -664,21 +1153,19 @@ class _ExplorePageState extends State<ExplorePage> {
                   SliverPadding(
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
                     sliver: SliverToBoxAdapter(
-                      child: loadingMore
-                          ? const Center(child: CircularProgressIndicator())
-                          : loadMoreError != null
-                          ? OutlinedButton.icon(
-                              onPressed: () => load(reset: false),
-                              icon: const Icon(Icons.refresh),
-                              label: const Text('Tải lỗi – Thử lại'),
-                            )
-                          : OutlinedButton(
-                              onPressed: () {
-                                page++;
-                                load(reset: false);
-                              },
-                              child: const Text('Xem thêm'),
-                            ),
+                      child: Center(
+                        child: loadMoreError != null
+                            ? TextButton(
+                                onPressed: loadNextPage,
+                                child: const Text('Tải tiếp thất bại. Chạm để thử lại'),
+                              )
+                            : loadingMore
+                                ? const Padding(
+                                    padding: EdgeInsets.all(16),
+                                    child: CircularProgressIndicator(),
+                                  )
+                                : const SizedBox(height: 24),
+                      ),
                     ),
                   )
                 else
@@ -689,6 +1176,7 @@ class _ExplorePageState extends State<ExplorePage> {
         ),
       ),
     ),
+  ),
   );
 }
 
@@ -707,13 +1195,46 @@ class NovelDetailPage extends StatefulWidget {
 class _NovelDetailPageState extends State<NovelDetailPage> {
   Novel? novel;
   List<ChapterInfo> chapters = [];
-  bool loading = true, saved = false;
+  bool loading = true;
+  bool saved = false;
+
+bool downloadingOffline = false;
+double offlineDownloadProgress = 0;
+
+  bool descriptionExpanded = false;
+  bool newestFirst = true;
+  int chapterPage = 1;
+  static const int chaptersPerPage = 20;
   String? error;
+
+  List<ChapterInfo> get orderedChapters {
+    final result = [...chapters];
+    result.sort(
+      (a, b) => newestFirst
+          ? b.number.compareTo(a.number)
+          : a.number.compareTo(b.number),
+    );
+    return result;
+  }
+
+  int get chapterPageCount =>
+      (chapters.length / chaptersPerPage).ceil().clamp(1, 999999).toInt();
+
+  List<ChapterInfo> get visibleChapters {
+    final start = (chapterPage - 1) * chaptersPerPage;
+    if (start >= chapters.length) return const [];
+
+    final end = (start + chaptersPerPage).clamp(0, chapters.length).toInt();
+    return orderedChapters.sublist(start, end);
+  }
+
   @override
   void initState() {
     super.initState();
     load();
   }
+
+
 
   Future<void> load() async {
     try {
@@ -721,36 +1242,41 @@ class _NovelDetailPageState extends State<NovelDetailPage> {
         widget.session.api.get('/api/novels/${widget.novelId}'),
         widget.session.api.get('/api/novels/${widget.novelId}/chapters'),
       ]);
+
       novel = Novel.from(Map<String, dynamic>.from(values[0]));
       chapters = (values[1] as List)
           .map((e) => ChapterInfo.from(Map<String, dynamic>.from(e)))
           .toList();
+
       if (widget.session.authenticated) {
-        final r = await widget.session.api.get(
+        final response = await widget.session.api.get(
           '/api/me/library',
           query: {'page': '1', 'pageSize': '100'},
           auth: true,
         );
-        saved = (r['items'] as List).any(
-          (e) => s(e['novelId']) == widget.novelId,
+
+        saved = (response['items'] as List).any(
+          (item) => s(item['novelId']) == widget.novelId,
         );
       }
+
       if (mounted) setState(() => loading = false);
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          loading = false;
-          error = errorText(e);
-        });
-      }
+      if (!mounted) return;
+
+      setState(() {
+        loading = false;
+        error = errorText(e);
+      });
     }
   }
 
-  Future<void> toggle() async {
+  Future<void> toggleSaved() async {
     if (!widget.session.authenticated) {
       await showAuth(context, widget.session);
       return;
     }
+
     try {
       if (saved) {
         await widget.session.api.delete(
@@ -763,180 +1289,574 @@ class _NovelDetailPageState extends State<NovelDetailPage> {
           auth: true,
         );
       }
-      setState(() => saved = !saved);
+
+      if (mounted) setState(() => saved = !saved);
     } catch (e) {
-      _snack(e);
+      showMessage(errorText(e));
     }
   }
 
-  Future<void> reportNovel() async {
-    if (!widget.session.authenticated) {
-      await showAuth(context, widget.session);
-      if (!widget.session.authenticated || !mounted) return;
-    }
-    final sent = await showContentReportDialog(context,
-      session: widget.session, targetType: 1, targetId: widget.novelId,
-      targetTitle: novel?.title ?? 'Truyện');
-    if (sent == true && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Đã gửi báo cáo để quản trị viên xem xét.')));
-    }
+// tải truyện
+Future<void> downloadNovelOffline() async {
+  debugPrint('authenticated=${widget.session.authenticated}');
+
+  if (!widget.session.authenticated) {
+    showMessage('Vui lòng đăng nhập để tải truyện.');
+    await showAuth(context, widget.session);
+    return;
   }
 
-  void _snack(Object e) {
+  final currentNovel = novel;
+  if (currentNovel == null || chapters.isEmpty || downloadingOffline) return;
+
+  setState(() {
+    downloadingOffline = true;
+    offlineDownloadProgress = 0;
+  });
+
+  try {
+    final downloadedChapters = <Map<String, dynamic>>[];
+
+    for (var index = 0; index < chapters.length; index++) {
+      final chapter = chapters[index];
+      final raw = await widget.session.api.get(
+        '/api/novels/chapters/${chapter.id}',
+      );
+
+      downloadedChapters.add({
+        'id': chapter.id,
+        'number': chapter.number,
+        'title': chapter.title,
+        'data': Map<String, dynamic>.from(raw),
+      });
+
+      if (mounted) {
+        setState(() {
+          offlineDownloadProgress = (index + 1) / chapters.length;
+        });
+      }
+    }
+
+    await saveOfflineNovel(widget.novelId, {
+      'novelId': widget.novelId,
+      'title': currentNovel.title,
+      'author': currentNovel.author,
+      'cover': currentNovel.cover,
+      'description': currentNovel.description,
+      'downloadedAt': DateTime.now().toIso8601String(),
+      'chapters': downloadedChapters,
+    });
+
     if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(errorText(e))));
+      showMessage('Đã tải truyện để đọc offline.');
+    }
+  } catch (e) {
+    if (mounted) {
+      showMessage(
+        e is ApiException
+            ? 'Tải truyện thất bại: ${errorText(e)}'
+            : 'Không thể lưu truyện xuống thiết bị: $e',
+      );
+    }
+  } finally {
+    if (mounted) {
+      setState(() => downloadingOffline = false);
     }
   }
+}
 
-  void open(ChapterInfo c, [double position = 0]) => Navigator.push(
+
+
+
+  void showMessage(String message) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+
+  void showPendingMessage(String feature) {
+    showMessage('$feature đang chờ kết nối với máy chủ.');
+  }
+
+ Future<void> open(ChapterInfo chapter, [double position = 0]) async {
+  await Navigator.push<void>(
     context,
-    MaterialPageRoute(
+    MaterialPageRoute<void>(
       builder: (_) => ReaderPage(
         session: widget.session,
         chapters: chapters,
-        index: chapters.indexOf(c),
+        index: chapters.indexOf(chapter),
         restorePercent: position,
       ),
     ),
   );
-  Future<void> resume() async {
+
+  if (mounted) await load();
+}
+
+  Future<void> readOrResume() async {
+    if (!widget.session.authenticated) {
+      if (chapters.isNotEmpty) open(chapters.first);
+      return;
+    }
+
     try {
-      final r = await widget.session.api.get(
+      final response = await widget.session.api.get(
         '/api/me/novels/${widget.novelId}/continue',
         auth: true,
       );
-      if (r['available'] != true) {
-        throw ApiException(404, 'Chương không còn khả dụng.');
+
+      if (response['available'] != true) {
+        if (chapters.isNotEmpty) open(chapters.first);
+        return;
       }
-      final idx = chapters.indexWhere((x) => x.id == s(r['chapterId']));
-      if (idx >= 0) open(chapters[idx], d(r['positionPercent']));
-    } on ApiException catch (e) {
-      if (e.status == 404 && chapters.isNotEmpty) {
+
+      final index = chapters.indexWhere(
+        (chapter) => chapter.id == s(response['chapterId']),
+      );
+
+      if (index >= 0) {
+        open(chapters[index], d(response['positionPercent']));
+      } else if (chapters.isNotEmpty) {
+        open(chapters.first);
+      }
+    } catch (_) {
+      if (chapters.isNotEmpty) {
         open(chapters.first);
       } else {
-        _snack(e);
+        showPendingMessage('Đọc truyện');
       }
-    } catch (e) {
-      _snack(e);
     }
   }
 
-  @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(
-      title: Text(novel?.title ?? 'Chi tiết'),
-      actions: [
-        IconButton(
-          onPressed: toggle,
-          icon: Icon(saved ? Icons.bookmark : Icons.bookmark_border),
-        ),
-        PopupMenuButton<String>(
-          tooltip: 'Tùy chọn',
-          onSelected: (value) { if (value == 'report') reportNovel(); },
-          itemBuilder: (_) => const [
-            PopupMenuItem(value: 'report', child: ListTile(
-              contentPadding: EdgeInsets.zero, leading: Icon(Icons.flag_outlined), title: Text('Báo cáo'))),
+
+
+  Future<void> showGiftDialog() async {
+    const beanAmounts = [10, 20, 50, 100];
+    int selectedAmount = beanAmounts.first;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Tặng đậu cho tác giả'),
+          content: Wrap(
+            spacing: 8,
+            children: beanAmounts.map((amount) {
+              return ChoiceChip(
+                label: Text('$amount đậu'),
+                selected: selectedAmount == amount,
+                onSelected: (_) {
+                  setDialogState(() => selectedAmount = amount);
+                },
+              );
+            }).toList(),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Để sau'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Tặng đậu'),
+            ),
           ],
         ),
-      ],
-    ),
-    body: loading
-        ? const Center(child: CircularProgressIndicator())
-        : error != null
-        ? ErrorRetry(error!, load)
-        : ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Cover(novel!.cover, width: 112, height: 158),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Column(
+      ),
+    );
+
+    if (confirmed == true && mounted) {
+      showPendingMessage('Tặng đậu');
+    }
+  }
+
+  Future<void> showRatingDialog() async {
+    int selectedRating = 5;
+
+    final submitted = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Đánh giá truyện'),
+          content: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(5, (index) {
+              return IconButton(
+                onPressed: () {
+                  setDialogState(() => selectedRating = index + 1);
+                },
+                icon: Icon(
+                  index < selectedRating ? Icons.star : Icons.star_border,
+                ),
+                color: Theme.of(context).colorScheme.primary,
+              );
+            }),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Hủy'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Gửi đánh giá'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (submitted == true && mounted) {
+      showPendingMessage('Đánh giá');
+    }
+  }
+
+  Future<void> showReportDialog() async {
+    final currentNovel = novel;
+    if (currentNovel == null) return;
+    if (!widget.session.authenticated) {
+      await showAuth(context, widget.session);
+      if (!widget.session.authenticated || !mounted) return;
+    }
+    final sent = await showContentReportDialog(
+      context,
+      session: widget.session,
+      targetType: 1,
+      targetId: widget.novelId,
+      targetTitle: currentNovel.title,
+    );
+    if (sent == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Đã gửi báo cáo để quản trị viên xem xét.')),
+      );
+    }
+  }
+
+  Future<void> copyNovelInfo() async {
+    await Clipboard.setData(
+      ClipboardData(
+        text: '${novel!.title}\n${novel!.author ?? ''}',
+      ),
+    );
+
+    if (mounted) {
+      showMessage('Đã sao chép tên truyện và tác giả.');
+    }
+  }
+
+  String formatDate(DateTime date) {
+    final day = date.day.toString().padLeft(2, '0');
+    final month = date.month.toString().padLeft(2, '0');
+    return '$day/$month/${date.year}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        // Nút quay lại mặc định của AppBar được giữ nguyên.
+        title: Text(novel?.title ?? 'Chi tiết'),
+        actions: [
+          IconButton(
+            tooltip: 'Báo cáo truyện',
+            onPressed: novel == null ? null : showReportDialog,
+            icon: const Icon(Icons.flag_outlined),
+          ),
+          IconButton(
+            tooltip: 'Chia sẻ',
+            onPressed: novel == null ? null : copyNovelInfo,
+            icon: const Icon(Icons.share_outlined),
+          ),
+          IconButton(
+            tooltip: saved ? 'Bỏ lưu truyện' : 'Lưu truyện',
+            onPressed: toggleSaved,
+            icon: Icon(
+              saved ? Icons.bookmark : Icons.bookmark_border,
+            ),
+          ),
+        ],
+      ),
+      body: loading
+          ? const Center(child: CircularProgressIndicator())
+          : error != null
+              ? ErrorRetry(error!, load)
+              : ListView(
+                  padding: const EdgeInsets.all(16),
+                  children: [
+                    Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          novel!.title,
-                          style: Theme.of(context).textTheme.titleLarge,
+                        Column(
+                          children: [
+                            Cover(novel!.cover, width: 100, height: 142),
+                            const SizedBox(height: 8),
+                            // SizedBox(
+                            //   width: 112,
+                            //   child: OutlinedButton.icon(
+                            //     onPressed: showGiftDialog,
+                            //     icon: const Icon(Icons.card_giftcard_outlined, size: 18),
+                            //     label: const Text('Tặng đậu'),
+                            //     style: OutlinedButton.styleFrom(
+                            //       padding: const EdgeInsets.symmetric(horizontal: 6),
+                            //       visualDensity: VisualDensity.compact,
+                            //     ),
+                            //   ),
+                            // ),
+                          ],
                         ),
-                        Text(novel!.author ?? 'Chưa rõ tác giả'),
-                        const SizedBox(height: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 9,
-                            vertical: 5,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Theme.of(
-                              context,
-                            ).colorScheme.primaryContainer,
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: Text(
-                            novel!.completed ? 'Hoàn thành' : 'Đang cập nhật',
-                            style: TextStyle(
-                              color: Theme.of(context).colorScheme.primary,
-                              fontWeight: FontWeight.w700,
-                            ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                novel!.title,
+                                style: Theme.of(context).textTheme.titleLarge,
+                              ),
+                              TextButton(
+                                onPressed: () =>
+                                    showPendingMessage('Trang tác giả'),
+                                style: TextButton.styleFrom(
+                                  padding: EdgeInsets.zero,
+                                  alignment: Alignment.centerLeft,
+                                ),
+                                child: Text(
+                                  novel!.author ?? 'Chưa rõ tác giả',
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Chip(
+                                label: Text(
+                                  novel!.completed
+                                      ? 'Hoàn thành'
+                                      : 'Đang cập nhật',
+                                ),
+                              ),
+                              Text('${chapters.length} chương'),
+                              Text('${novel!.views} lượt xem'),
+                              if (novel!.updatedAt != null)
+                                Text(
+                                  'Cập nhật ${formatDate(novel!.updatedAt!)}',
+                                ),
+                            ],
                           ),
                         ),
                       ],
                     ),
-                  ),
-                ],
+
+                    if (novel!.categories.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Wrap(
+                          spacing: 8,
+                          runSpacing: 4,
+                          children: novel!.categories.map((category) {
+                            return Chip(label: Text(category.name));
+                          }).toList(),
+                        ),
+                      )
+                    else
+                      const Align(
+                        alignment: Alignment.centerLeft,
+                        child: Padding(
+                          padding: EdgeInsets.only(top: 8),
+                          child: Text('Thể loại chưa được máy chủ cung cấp.'),
+                        ),
+                      ),
+
+
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        onPressed: showRatingDialog,
+                        icon: const Icon(Icons.star_outline),
+                        label: const Text('Đánh giá truyện'),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      novel!.description ?? 'Chưa có mô tả.',
+                      maxLines: descriptionExpanded ? null : 4,
+                      overflow: descriptionExpanded
+                          ? null
+                          : TextOverflow.ellipsis,
+                    ),
+                    if ((novel!.description?.length ?? 0) > 180)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton(
+                          onPressed: () {
+                            setState(() {
+                              descriptionExpanded = !descriptionExpanded;
+                            });
+                          },
+                          child: Text(
+                            descriptionExpanded ? 'Thu gọn' : 'Xem thêm',
+                          ),
+                        ),
+                      ),
+                    const SizedBox(height: 12),
+                    Wrap(
+  spacing: 8,
+  runSpacing: 8,
+  children: [
+    FilledButton.icon(
+      onPressed: chapters.isEmpty ? null : readOrResume,
+      icon: const Icon(Icons.menu_book_rounded),
+      label: const Text('Đọc truyện'),
+    ),
+    OutlinedButton.icon(
+      onPressed: toggleSaved,
+      icon: Icon(saved ? Icons.bookmark : Icons.bookmark_outline),
+      label: Text(saved ? 'Đã lưu' : 'Lưu'),   
+    ),
+
+
+OutlinedButton.icon(
+  onPressed: downloadingOffline || chapters.isEmpty
+      ? null
+      : downloadNovelOffline,
+  icon: downloadingOffline
+      ? const SizedBox(
+          width: 18,
+          height: 18,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        )
+      : const Icon(Icons.download_for_offline_outlined),
+  label: Text(
+    downloadingOffline
+        ? 'Đang tải ${(offlineDownloadProgress * 100).round()}%'
+        : 'Tải xuống',
+  ),
+),
+
+
+
+    OutlinedButton.icon(
+      onPressed: showGiftDialog,
+      icon: const Icon(Icons.card_giftcard_outlined),
+      label: const Text('Tặng đậu'),
+    ),
+    OutlinedButton.icon(
+      onPressed: showRatingDialog,
+      icon: const Icon(Icons.star_outline),
+      label: const Text('Đánh giá'),
+    ),
+  ],
+),
+
+if (downloadingOffline)
+  Padding(
+    padding: const EdgeInsets.only(top: 8),
+    child: LinearProgressIndicator(value: offlineDownloadProgress),
+  ),
+
+const Divider(height: 32),
+
+
+                    const Divider(height: 32),
+                    Card(
+  child: Padding(
+    padding: const EdgeInsets.all(16),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Bình luận truyện',
+          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.w700,
               ),
-              const SizedBox(height: 16),
-              Text(novel!.description ?? 'Chưa có mô tả.'),
-              if (novel!.categories.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 6,
-                  children: novel!.categories
-                      .map((category) => Chip(label: Text(category.name)))
-                      .toList(),
+        ),
+        const SizedBox(height: 8),
+        const Text(
+          'Bình luận sẽ hiển thị tại đây, kèm tên chương.',
+        ),
+      ],
+    ),
+  ),
+),
+const SizedBox(height: 12),
+                    Text(
+                      'Danh sách chương',
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                            fontWeight: FontWeight.w800,
+                          ),
+                    ),
+                    const SizedBox(height: 10),
+                    Align(
+                          alignment: Alignment.centerRight,
+                          child: DropdownButtonHideUnderline(
+                            child: DropdownButton<bool>(
+                              isDense: true,
+                              value: newestFirst,
+                              iconSize: 16,
+                              style: Theme.of(context).textTheme.labelSmall,
+                              items: const [
+                                DropdownMenuItem(
+                                  value: false,
+                                  child: Text('Cũ nhất trước'),
+                                ),
+                                DropdownMenuItem(
+                                  value: true,
+                                  child: Text('Mới nhất trước'),
+                                ),
+                              ],
+                              onChanged: (value) {
+                                if (value == null) return;
+                                setState(() {
+                                  newestFirst = value;
+                                  chapterPage = 1;
+                                });
+                              },
+                            ),
+                          ),
+                        ),
+                    if (chapters.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Center(
+                          child: Text('Chưa có chương công khai.'),
+                        ),
+                      ),
+                    ...visibleChapters.map(
+                      (chapter) => ListTile(
+                        title: Text(
+                          'Chương ${chapter.number}: ${chapter.title}',
+                        ),
+                        onTap: () => open(chapter),
+                      ),
+                    ),
+                    if (chapters.length > chaptersPerPage)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            IconButton(
+                              tooltip: 'Trang trước',
+                              onPressed: chapterPage > 1
+                                  ? () => setState(() => chapterPage--)
+                                  : null,
+                              icon: const Icon(Icons.chevron_left),
+                            ),
+                            Text('Trang $chapterPage / $chapterPageCount'),
+                            IconButton(
+                              tooltip: 'Trang sau',
+                              onPressed: chapterPage < chapterPageCount
+                                  ? () => setState(() => chapterPage++)
+                                  : null,
+                              icon: const Icon(Icons.chevron_right),
+                            ),
+                          ],
+                        ),
+                      ),
+                                      ],
                 ),
-              ],
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  FilledButton.icon(
-                    onPressed: chapters.isEmpty
-                        ? null
-                        : widget.session.authenticated
-                        ? resume
-                        : () => open(chapters.first),
-                    icon: const Icon(Icons.menu_book_rounded),
-                    label: const Text('Đọc / Đọc tiếp'),
-                  ),
-                  const SizedBox(width: 10),
-                  OutlinedButton.icon(
-                    onPressed: toggle,
-                    icon: Icon(saved ? Icons.bookmark : Icons.bookmark_outline),
-                    label: Text(saved ? 'Đã lưu' : 'Lưu truyện'),
-                  ),
-                ],
-              ),
-              const Divider(),
-              const Text('Danh sách chương'),
-              if (chapters.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.all(24),
-                  child: Center(child: Text('Chưa có chương công khai.')),
-                ),
-              ...chapters.map(
-                (c) => ListTile(
-                  title: Text('Chương ${c.number}: ${c.title}'),
-                  onTap: () => open(c),
-                ),
-              ),
-            ],
-          ),
-  );
+    );
+  }
 }
 
 class ReaderPage extends StatefulWidget {
@@ -946,11 +1866,15 @@ class ReaderPage extends StatefulWidget {
     required this.chapters,
     required this.index,
     this.restorePercent = 0,
+    this.offlineChapterData,
+this.offlineNovelTitle,
   });
   final Session session;
   final List<ChapterInfo> chapters;
   final int index;
   final double restorePercent;
+  final Map<String, Map<String, dynamic>>? offlineChapterData;
+final String? offlineNovelTitle;
   @override
   State<ReaderPage> createState() => _ReaderPageState();
 }
@@ -958,14 +1882,65 @@ class ReaderPage extends StatefulWidget {
 class _ReaderPageState extends State<ReaderPage> {
   late int index;
   final scroll = ScrollController();
+  final commentController = TextEditingController();
   Timer? debounce;
+  final FlutterTts tts = FlutterTts();
+Timer? sleepTimer;
+bool isSpeaking = false;
+bool autoNextChapter = true;
+int stopAfterMinutes = 30;
+double voiceSpeed = 33;
+double voicePitch = 33;
+String readerVoice = 'vi-VN-language';
   ChapterContent? chapter;
+  String? novelTitle;
   String? sessionId, error;
   int generation = 0, sequence = 0;
   bool loading = true, suppressProgress = false, allowPop = false;
+  bool showAudioControls = false;
+double speechProgress = 0;
+int speechOffset = 0;
+int speechRunToken = 0;
+
+String readingMode = 'Kết hợp';
+
+final PageController readerPageController = PageController();
+
+int readerPageIndex = 0;
+int readerPageCount = 0;
+
+double pendingReaderPercent = 0;
+bool restorePagePending = true;
+  bool isAutoScrolling = false;
+Timer? autoScrollTimer;
   double? pendingPercent;
-  double fontSize = 18;
-  int background = 0;
+double fontSize = 18;
+double lineSpacing = 4;
+double autoScrollSpeed = 25;
+String fontFamily = 'serif';
+bool twoSidedMargins = true;
+bool autoScrollOnOpen = false;
+int background = 0;
+
+TextStyle _readerTextStyle(Color foreground) {
+  final base = TextStyle(
+    fontSize: fontSize,
+    height: 1.15 + lineSpacing * 0.15,
+    color: foreground,
+  );
+
+  switch (fontFamily) {
+    case 'sans':
+      return base;
+    case 'italic':
+      return base.copyWith(
+        fontStyle: FontStyle.italic,
+      );
+    default:
+      return base.copyWith(fontFamily: 'serif');
+  }
+}
+
   @override
   void initState() {
     super.initState();
@@ -981,6 +1956,25 @@ class _ReaderPageState extends State<ReaderPage> {
       setState(() {
         fontSize = p.getDouble('reader_font') ?? 18;
         background = p.getInt('reader_bg') ?? 0;
+        lineSpacing = p.getDouble('reader_line_spacing') ?? 4;
+
+final savedFont = p.getString('reader_font_family') ?? 'serif';
+fontFamily = const ['serif', 'sans', 'italic'].contains(savedFont)
+    ? savedFont
+    : 'serif';
+readingMode = p.getString('reader_mode') ?? 'Kết hợp';
+twoSidedMargins =
+    p.getBool('reader_two_sided_margins') ?? true;
+autoScrollSpeed =
+    p.getDouble('reader_auto_scroll_speed') ?? 25;
+  
+autoScrollOnOpen =
+    p.getBool('reader_auto_scroll_open') ?? false;
+        voiceSpeed = p.getDouble('reader_voice_speed') ?? 33;
+voicePitch = p.getDouble('reader_voice_pitch') ?? 33;
+readerVoice = p.getString('reader_voice') ?? 'vi-VN-language';
+autoNextChapter = p.getBool('reader_auto_next') ?? true;
+stopAfterMinutes = p.getInt('reader_stop_after') ?? 30;
       });
     }
   }
@@ -989,49 +1983,72 @@ class _ReaderPageState extends State<ReaderPage> {
     final mine = ++generation;
     debounce?.cancel();
     pendingPercent = null;
-    suppressProgress = true;
-    sessionId = null;
+pendingPercent = null;
+pendingReaderPercent = restore.clamp(0, 100).toDouble();
+restorePagePending = true;
+readerPageIndex = 0;
+suppressProgress = true;
     sequence = 0;
     setState(() {
       loading = true;
       error = null;
     });
     try {
-      final c = ChapterContent.from(
-        Map<String, dynamic>.from(
-          await widget.session.api.get(
-            '/api/novels/chapters/${widget.chapters[index].id}',
-          ),
-        ),
-      );
+      final chapterId = widget.chapters[index].id;
+final raw = widget.offlineChapterData?[chapterId] ??
+    await widget.session.api.get('/api/novels/chapters/$chapterId');
+
+final c = ChapterContent.from(
+  Map<String, dynamic>.from(raw),
+);
       if (mine != generation) return;
-      if (widget.session.authenticated) {
+      if (novelTitle == null && widget.offlineNovelTitle != null) {
+  novelTitle = widget.offlineNovelTitle;
+}
+      if (novelTitle == null) {
+  try {
+    final novelData = await widget.session.api.get(
+      '/api/novels/${c.novelId}',
+    );
+    novelTitle = s(novelData['title']);
+  } catch (_) {}
+}
+      if (widget.offlineChapterData == null &&
+    widget.session.authenticated) {
         final r = await widget.session.api.post(
           '/api/me/novels/${c.novelId}/chapters/${c.id}/sessions',
           auth: true,
         );
         if (mine != generation) return;
         sessionId = s(r['sessionId']);
-        await widget.session.api.post(
-          '/api/me/novels/${c.novelId}/chapters/${c.id}/views',
-          auth: true,
-        );
+      await widget.session.api.post(
+  '/api/me/novels/${c.novelId}/chapters/${c.id}/views',
+  auth: true,
+);
       }
       if (!mounted || mine != generation) return;
       setState(() {
         chapter = c;
         loading = false;
       });
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && mine == generation && scroll.hasClients) {
-          scroll.jumpTo(
-            scroll.position.maxScrollExtent * (restore.clamp(0, 100) / 100),
-          );
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted && mine == generation) suppressProgress = false;
-          });
-        }
-      });
+WidgetsBinding.instance.addPostFrameCallback((_) {
+  if (!mounted || mine != generation) return;
+
+  if (readingMode != 'Lật trang' && scroll.hasClients) {
+    scroll.jumpTo(
+      scroll.position.maxScrollExtent *
+          (restore.clamp(0, 100) / 100),
+    );
+  }
+
+  if (readingMode != 'Lật trang') {
+    suppressProgress = false;
+
+    if (autoScrollOnOpen && !isAutoScrolling) {
+      toggleAutoScroll();
+    }
+  }
+});
     } catch (e) {
       if (mounted && mine == generation) {
         setState(() {
@@ -1086,12 +2103,21 @@ class _ReaderPageState extends State<ReaderPage> {
     }
   }
 
-  double _currentPercent() =>
-      !scroll.hasClients || scroll.position.maxScrollExtent <= 0
-      ? 100
-      : (scroll.offset / scroll.position.maxScrollExtent * 100)
-            .clamp(0, 100)
-            .toDouble();
+double _currentPercent() {
+  if (readingMode == 'Lật trang' && readerPageCount > 0) {
+    return (readerPageIndex / readerPageCount * 100)
+        .clamp(0, 100)
+        .toDouble();
+  }
+
+  if (!scroll.hasClients || scroll.position.maxScrollExtent <= 0) {
+    return 0;
+  }
+
+  return (scroll.offset / scroll.position.maxScrollExtent * 100)
+      .clamp(0, 100)
+      .toDouble();
+}
 
   Future<void> flushProgress() async {
     debounce?.cancel();
@@ -1105,6 +2131,8 @@ class _ReaderPageState extends State<ReaderPage> {
     if (next < 0 || next >= widget.chapters.length) return;
     await flushProgress();
     index = next;
+    speechOffset = 0;
+speechProgress = 0;
     await loadChapter();
   }
 
@@ -1130,26 +2158,482 @@ class _ReaderPageState extends State<ReaderPage> {
     });
   }
 
-  Future<void> reportChapter() async {
-    if (chapter == null) return;
-    if (!widget.session.authenticated) {
-      await showAuth(context, widget.session);
-      if (!widget.session.authenticated || !mounted) return;
+
+void _scheduleProgressSave(double value) {
+  if (sessionId == null || chapter == null) return;
+
+  final mine = generation;
+  pendingPercent = value.clamp(0, 100).toDouble();
+  debounce?.cancel();
+
+  debounce = Timer(const Duration(milliseconds: 700), () {
+    final latest = pendingPercent;
+    if (latest != null) save(latest, mine);
+  });
+}
+
+void _onReaderPageChanged(int page, int textPageCount) {
+  readerPageIndex = page;
+  readerPageCount = textPageCount;
+
+  if (mounted) setState(() {});
+
+  final percent =
+      textPageCount == 0 ? 0.0 : page / textPageCount * 100;
+  _scheduleProgressSave(percent);
+}
+
+List<String> _paginateText(String text, double width, double height) {
+  if (text.trim().isEmpty) return const [''];
+
+  final lineHeight = fontSize * (1.15 + lineSpacing * 0.15);
+  final charsPerLine =
+(width / (fontSize * 0.56)).floor().clamp(8, 120).toInt();
+  final linesPerPage =
+      (height / lineHeight).floor().clamp(5, 80).toInt();
+  final capacity =
+      (charsPerLine * linesPerPage * 0.68).floor().clamp(40, 2400).toInt();
+
+  final pages = <String>[];
+  var start = 0;
+
+  while (start < text.length) {
+    var end = (start + capacity).clamp(start + 1, text.length).toInt();
+
+    if (end < text.length) {
+      final minimumBreak = start + (capacity * 0.65).floor();
+      final newline = text.lastIndexOf('\n', end);
+      final space = text.lastIndexOf(' ', end);
+      final breakAt = newline > minimumBreak ? newline : space;
+
+      if (breakAt > minimumBreak) end = breakAt + 1;
     }
-    final sent = await showContentReportDialog(context,
-      session: widget.session, targetType: 2, targetId: chapter!.id,
-      targetTitle: 'Chương ${chapter!.number}: ${chapter!.title}');
-    if (sent == true && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Đã gửi báo cáo để quản trị viên xem xét.')));
+
+    final page = text.substring(start, end).trim();
+    if (page.isNotEmpty) pages.add(page);
+
+    start = end;
+    while (start < text.length && text[start].trim().isEmpty) {
+      start++;
     }
   }
 
+  return pages.isEmpty ? const [''] : pages;
+}
+
+Widget _chapterText(String text, Color foreground) {
+  return SelectableText(
+    text,
+    textAlign: TextAlign.justify,
+    style: _readerTextStyle(foreground),
+  );
+}
+
+Widget _chapterEndMatter(Color foreground) {
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      const SizedBox(height: 28),
+      OutlinedButton.icon(
+        onPressed: showChapterGift,
+        icon: const Icon(Icons.card_giftcard_outlined),
+        label: const Text('Tặng đậu cho tác giả'),
+      ),
+      const Divider(height: 36),
+      Text(
+        'Bình luận chương này',
+        style: TextStyle(
+          color: foreground,
+          fontSize: 18,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+      const SizedBox(height: 10),
+      Text(
+        'Bình luận sẽ hiển thị khi được kết nối với máy chủ.',
+        style: TextStyle(color: foreground.withValues(alpha: 0.7)),
+      ),
+      const SizedBox(height: 10),
+      TextField(
+        controller: commentController,
+        minLines: 2,
+        maxLines: 4,
+        style: TextStyle(color: foreground),
+        decoration: InputDecoration(
+          filled: true,
+          fillColor:
+              background == 2 ? const Color(0xFF29272D) : Colors.white,
+          hintText: 'Chia sẻ cảm nhận của bạn…',
+          hintStyle: TextStyle(
+            color: background == 2 ? Colors.white60 : Colors.black54,
+          ),
+          enabledBorder: const OutlineInputBorder(),
+          focusedBorder: const OutlineInputBorder(),
+        ),
+      ),
+      const SizedBox(height: 8),
+      Align(
+        alignment: Alignment.centerRight,
+        child: FilledButton.icon(
+          onPressed: submitChapterComment,
+          icon: const Icon(Icons.send_rounded),
+          label: const Text('Gửi bình luận'),
+        ),
+      ),
+    ],
+  );
+}
+
+
+void toggleAutoScroll() {
+ if (readingMode == 'Lật trang') return;
+  if (isAutoScrolling) {
+    autoScrollTimer?.cancel();
+    setState(() => isAutoScrolling = false);
+    return;
+  }
+
+  setState(() => isAutoScrolling = true);
+  autoScrollTimer = Timer.periodic(
+    const Duration(milliseconds: 80),
+    (_) {
+      if (!scroll.hasClients ||
+          scroll.position.pixels >= scroll.position.maxScrollExtent) {
+        autoScrollTimer?.cancel();
+        if (mounted) setState(() => isAutoScrolling = false);
+        return;
+      }
+
+      scroll.jumpTo(
+        (scroll.position.pixels + (autoScrollSpeed / 20).clamp(1.0, 5.0).toDouble()).clamp(
+          0.0,
+          scroll.position.maxScrollExtent,
+        ),
+      );
+    },
+  );
+}
+
+Future<void> toggleSpeech() async {
+  if (isSpeaking) {
+  ++speechRunToken; // Vô hiệu hóa vòng đọc cũ
+  sleepTimer?.cancel();
+
+  try {
+    await tts.stop();
+  } catch (_) {}
+
+  if (mounted) {
+    setState(() => isSpeaking = false);
+  }
+  return;
+}
+
+  if (chapter == null) return;
+
+  final text = chapter!.content;
+  if (speechOffset >= text.length) {
+    speechOffset = 0;
+    speechProgress = 0;
+  }
+
+  final run = ++speechRunToken;
+
+  setState(() {
+    isSpeaking = true;
+    showAudioControls = true;
+  });
+
+  if (stopAfterMinutes > 0) {
+    sleepTimer?.cancel();
+    sleepTimer = Timer(Duration(minutes: stopAfterMinutes), () async {
+      try {
+                ++speechRunToken;
+        await tts.stop();
+      } catch (_) {}
+      if (mounted) setState(() => isSpeaking = false);
+    });
+  }
+
+  try {
+    await tts.awaitSpeakCompletion(false);
+    await tts.setLanguage('vi-VN');
+
+    if (readerVoice.isNotEmpty) {
+      try {
+        await tts.setVoice({
+          'name': readerVoice,
+          'locale': 'vi-VN',
+        });
+      } catch (e) {
+        debugPrint('Không áp dụng được voice đã chọn: $e');
+      }
+    }
+
+    // Web: rate 1.0 là bình thường. Android/iOS: khoảng 0.5 là bình thường.
+    final rate = kIsWeb
+        ? (voiceSpeed / 33).clamp(0.5, 3.0).toDouble()
+        : (voiceSpeed / 100).clamp(0.1, 1.0).toDouble();
+
+    await tts.setSpeechRate(rate);
+    await tts.setPitch((0.5 + voicePitch / 100).clamp(0.5, 2.0).toDouble());
+
+    // Đọc theo các đoạn ngắn để phần trăm tiến triển dần.
+  
+    while (mounted && run == speechRunToken && isSpeaking) {
+      final currentText = chapter?.content ?? '';
+      if (currentText.isEmpty) break;
+
+      if (speechOffset >= currentText.length) {
+        if (!autoNextChapter || index + 1 >= widget.chapters.length) break;
+
+        await flushProgress();
+        index++;
+        speechOffset = 0;
+        speechProgress = 0;
+        await loadChapter();
+
+        if (!mounted || run != speechRunToken || chapter == null) break;
+        continue;
+      }
+const chunkSize = 180;
+      final start = speechOffset;
+var end = (start + chunkSize).clamp(0, currentText.length).toInt();
+
+if (end < currentText.length) {
+  final space = currentText.lastIndexOf(' ', end);
+  final newline = currentText.lastIndexOf('\n', end);
+  final breakAt = space > newline ? space : newline;
+
+  if (breakAt > start + (chunkSize * 0.6).round()) {
+    end = breakAt + 1;
+  }
+}
+
+final chunk = currentText.substring(start, end);
+
+      final done = Completer<void>();
+      void finish() {
+        if (!done.isCompleted) done.complete();
+      }
+
+      tts.setCompletionHandler(finish);
+      tts.setCancelHandler(finish);
+      tts.setErrorHandler((_) => finish());
+
+      tts.setProgressHandler((spokenText, startOffset, endOffset, word) {
+        if (!mounted || run != speechRunToken || !isSpeaking) return;
+
+        final offset = (start + endOffset).clamp(start, end);
+        setState(() {
+          speechOffset = offset;
+          speechProgress =
+              (speechOffset / currentText.length).clamp(0.0, 1.0).toDouble();
+        });
+      });
+
+      await tts.speak(chunk);
+      // Chờ đọc xong đoạn này (có timeout phòng khi Chrome không báo kết thúc).
+      await done.future.timeout(
+        Duration(seconds: 20 + chunk.length ~/ 4),
+        onTimeout: () {},
+      );
+
+      if (!mounted || run != speechRunToken || !isSpeaking) return;
+
+      // Chỉ chuyển sang đoạn sau khi đoạn này thực sự đọc xong.
+      speechOffset = end;
+      speechProgress =
+          (speechOffset / currentText.length).clamp(0.0, 1.0).toDouble();
+      setState(() {});
+    }
+  } catch (_) {
+    if (mounted && run == speechRunToken) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Không phát được giọng đọc.')),
+      );
+    }
+  } finally {
+    if (mounted && run == speechRunToken) {
+      sleepTimer?.cancel();
+      setState(() => isSpeaking = false);
+    }
+  }
+}
+
+Future<void> stopSpeech() async {
+  ++speechRunToken;
+  sleepTimer?.cancel();
+
+  try {
+    await tts.stop();
+  } catch (_) {}
+  if (kIsWeb) await Future.delayed(const Duration(milliseconds: 250));
+  if (mounted) {
+    setState(() {
+      isSpeaking = false;
+      speechOffset = 0;
+      speechProgress = 0;
+    });
+  }
+}
+Future<void> seekSpeech(double progress) async {
+  final text = chapter?.content ?? '';
+  if (text.isEmpty) return;
+
+  final normalizedProgress = progress.clamp(0.0, 1.0).toDouble();
+
+  // Kéo đến cuối chương thì giữ thanh ở 100%, không phát lại từ đầu.
+  if (normalizedProgress >= 1.0) {
+    await stopSpeech();
+    if (!mounted) return;
+
+    speechOffset = text.length;
+    speechProgress = 1.0;
+    setState(() => showAudioControls = true);
+    return;
+  }
+
+  var target = (normalizedProgress * text.length)
+      .round()
+      .clamp(0, text.length - 1)
+      .toInt();
+
+  // Nếu đang ở giữa một từ, lùi về đầu từ.
+  while (target > 0 &&
+      target < text.length &&
+      text[target].trim().isNotEmpty &&
+      text[target - 1].trim().isNotEmpty) {
+    target--;
+  }
+
+  // Bỏ qua khoảng trắng để bắt đầu đọc ở ký tự có nội dung.
+  while (target < text.length && text[target].trim().isEmpty) {
+    target++;
+  }
+
+  await stopSpeech();
+  if (!mounted) return;
+
+  speechOffset = target;
+  speechProgress =
+      (target / text.length).clamp(0.0, 1.0).toDouble();
+
+  setState(() => showAudioControls = true);
+  await toggleSpeech();
+}
+Future<void> moveSpeechChapter(int delta) async {
+  final next = index + delta;
+
+  if (next < 0 || next >= widget.chapters.length) return;
+
+  await stopSpeech();
+  await move(delta);
+
+  speechOffset = 0;
+  speechProgress = 0;
+
+  await toggleSpeech();
+}
+Future<void> reportChapter() async {
+  if (chapter == null) return;
+  if (!widget.session.authenticated) {
+    await showAuth(context, widget.session);
+    if (!widget.session.authenticated || !mounted) return;
+  }
+  final sent = await showContentReportDialog(
+    context,
+    session: widget.session,
+    targetType: 2,
+    targetId: chapter!.id,
+    targetTitle: 'Chương ${chapter!.number}: ${chapter!.title}',
+  );
+  if (sent == true && mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Đã gửi báo cáo để quản trị viên xem xét.')),
+    );
+  }
+}
+
   @override
   void dispose() {
-    debounce?.cancel();
-    scroll.dispose();
-    super.dispose();
+  debounce?.cancel();
+  sleepTimer?.cancel();
+  autoScrollTimer?.cancel();
+  scroll.dispose();
+  readerPageController.dispose();
+  commentController.dispose();
+  unawaited(tts.stop());
+  super.dispose();
+}
+
+  Future<void> showChapterGift() async {
+    const beanAmounts = [10, 20, 50, 100];
+    int selected = beanAmounts.first;
+
+    if (!widget.session.authenticated) {
+  ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(content: Text('Vui lòng đăng nhập để tặng đậu.')),
+  );
+  return;
+}
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Tặng đậu cho tác giả'),
+          content: Wrap(
+            spacing: 8,
+            children: beanAmounts.map((amount) {
+              return ChoiceChip(
+                label: Text('$amount đậu'),
+                selected: selected == amount,
+                onSelected: (_) {
+                  setDialogState(() => selected = amount);
+                },
+              );
+            }).toList(),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Để sau'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Tặng đậu'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (confirmed == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Tặng đậu đang chờ kết nối với máy chủ.'),
+        ),
+      );
+    }
+  }
+
+  void submitChapterComment() {
+
+    if (!widget.session.authenticated) {
+  ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(content: Text('Vui lòng đăng nhập để bình luận.')),
+  );
+  return;
+}
+
+    if (commentController.text.trim().isEmpty) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Bình luận đang chờ kết nối với máy chủ.'),
+      ),
+    );
   }
 
   @override
@@ -1171,66 +2655,240 @@ class _ReaderPageState extends State<ReaderPage> {
       },
       child: Scaffold(
         backgroundColor: bg,
-        appBar: AppBar(
-          backgroundColor: bg,
-          foregroundColor: fg,
-          title: Text(chapter?.title ?? 'Đang đọc'),
-          actions: [
-            IconButton(
-              key: const Key('report-chapter'),
-              tooltip: 'Báo cáo chương',
-              onPressed: chapter == null ? null : reportChapter,
-              icon: const Icon(Icons.flag_outlined),
-            ),
-            PopupMenuButton<int>(
-              onSelected: changeReaderSetting,
-              itemBuilder: (_) => const [
-                PopupMenuItem(value: 0, child: Text('Chữ nhỏ')),
-                PopupMenuItem(value: 1, child: Text('Chữ vừa')),
-                PopupMenuItem(value: 2, child: Text('Chữ lớn')),
-                PopupMenuItem(value: 3, child: Text('Nền sáng')),
-                PopupMenuItem(value: 4, child: Text('Nền vàng')),
-                PopupMenuItem(value: 5, child: Text('Nền tối')),
-              ],
-            ),
-          ],
-        ),
+       appBar: AppBar(
+  backgroundColor: bg,
+  foregroundColor: fg,
+ leadingWidth: 100,
+ titleSpacing: 0,
+actions: [
+  IconButton(
+    tooltip: 'Báo cáo chương',
+    onPressed: reportChapter,
+    icon: const Icon(Icons.flag_outlined),
+  ),
+],
+  title: Column(
+    
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        'Chương ${widget.chapters[index].number}: '
+        '${chapter?.title ?? "Đang đọc"}',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontSize: 18),
+      ),
+      Text(
+        '${index + 1}/${widget.chapters.length}',
+        style: const TextStyle(fontSize: 12),
+      ),
+    ],
+  ),
+),
         body: loading
             ? const Center(child: CircularProgressIndicator())
             : error != null
             ? ErrorRetry(error!, loadChapter)
             : Column(
                 children: [
-                  Expanded(
-                    child: SingleChildScrollView(
-                      controller: scroll,
-                      padding: const EdgeInsets.all(22),
-                      child: SelectableText(
-                        chapter!.content,
-                        style: TextStyle(
-                          fontSize: fontSize,
-                          height: 1.75,
-                          color: fg,
-                        ),
-                      ),
-                    ),
-                  ),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      TextButton(
-                        onPressed: index > 0 ? () => move(-1) : null,
-                        child: const Text('Chương trước'),
-                      ),
-                      Text('${index + 1}/${widget.chapters.length}'),
-                      TextButton(
-                        onPressed: index + 1 < widget.chapters.length
-                            ? () => move(1)
-                            : null,
-                        child: const Text('Chương sau'),
-                      ),
-                    ],
-                  ),
+Expanded(
+  child: LayoutBuilder(
+    builder: (context, constraints) {
+      final contentPadding = EdgeInsets.symmetric(
+        horizontal: twoSidedMargins ? 22 : 14,
+        vertical: 22,
+      );
+
+      if (readingMode == 'Lật trang') {
+        final pages = _paginateText(
+          chapter!.content,
+          constraints.maxWidth - contentPadding.horizontal,
+          constraints.maxHeight - contentPadding.vertical * 2,
+        );
+
+        readerPageCount = pages.length;
+
+        if (restorePagePending) {
+          restorePagePending = false;
+
+          final pageToRestore = (pendingReaderPercent / 100 * pages.length)
+              .round()
+              .clamp(0, pages.length)
+              .toInt();
+
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted || !readerPageController.hasClients) return;
+
+            readerPageController.jumpToPage(pageToRestore);
+            readerPageIndex = pageToRestore;
+            suppressProgress = false;
+          });
+        }
+
+        return PageView.builder(
+          controller: readerPageController,
+          itemCount: pages.length + 1,
+          onPageChanged: (page) =>
+              _onReaderPageChanged(page, pages.length),
+          itemBuilder: (context, page) {
+            return SingleChildScrollView(
+              padding: contentPadding,
+              child: page == pages.length
+                  ? _chapterEndMatter(fg)
+                  : _chapterText(pages[page], fg),
+            );
+          },
+        );
+      }
+
+      return SingleChildScrollView(
+        controller: scroll,
+        padding: contentPadding,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _chapterText(chapter!.content, fg),
+            _chapterEndMatter(fg),
+          ],
+        ),
+      );
+    },
+  ),
+),
+                  if (showAudioControls)
+                  ReaderAudioControls(
+  isPlaying: isSpeaking,
+  progress: speechProgress,
+  onPrevious: () => moveSpeechChapter(-1),
+  onPlayStop: toggleSpeech,
+  onNext: () => moveSpeechChapter(1),
+  onSeek: seekSpeech,
+),
+                  ReaderToolbar(
+  canGoPrevious: index > 0,
+  canGoNext: index + 1 < widget.chapters.length,
+  isAutoScrolling: isAutoScrolling,
+  onPrevious: () => move(-1),
+onSettings: () async {
+  final previousMode = readingMode;
+  final previousPercent = _currentPercent();
+
+  await Navigator.of(context).push<void>(
+    MaterialPageRoute(
+      builder: (_) => ReaderSettingsPage(tts: tts),
+    ),
+  );
+
+  await loadPrefs();
+
+  pendingReaderPercent = previousPercent;
+  restorePagePending = true;
+
+  if (readingMode != previousMode) {
+    if (readingMode != 'Kết hợp' && isAutoScrolling) {
+      autoScrollTimer?.cancel();
+      setState(() => isAutoScrolling = false);
+    }
+
+    readerPageIndex = 0;
+
+    if (readingMode != 'Lật trang' && scroll.hasClients) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !scroll.hasClients) return;
+
+        scroll.jumpTo(
+          scroll.position.maxScrollExtent * previousPercent / 100,
+        );
+
+        suppressProgress = false;
+      });
+    }
+  }
+
+    // Đang nghe thì khởi động lại giọng đọc để áp dụng cài đặt mới,
+  // giữ nguyên vị trí đang đọc.
+  if (isSpeaking) {
+    final keepOffset = speechOffset;
+    ++speechRunToken;
+    try {
+      await tts.stop();
+    } catch (_) {}
+    if (kIsWeb) {
+      await Future.delayed(const Duration(milliseconds: 250));
+    }
+    if (!mounted) return;
+    setState(() => isSpeaking = false);
+    speechOffset = keepOffset;
+    await toggleSpeech();
+  }
+},
+  onAutoScroll: toggleAutoScroll,
+onListen: toggleSpeech,
+onChapters: () {
+  showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    builder: (sheetContext) => SafeArea(
+      child: SizedBox(
+        height: MediaQuery.of(context).size.height * 0.75,
+        child: Column(
+          children: [
+            Padding(
+  padding: const EdgeInsets.all(16),
+  child: Column(
+    children: [
+      Text(
+        novelTitle ?? '',
+        textAlign: TextAlign.center,
+        style: Theme.of(context).textTheme.titleLarge,
+      ),
+      const SizedBox(height: 6),
+      const Text('Danh sách chương'),
+    ],
+  ),
+),
+            Expanded(
+              child: ListView.builder(
+                itemCount: widget.chapters.length,
+                itemBuilder: (context, chapterIndex) {
+                  final item = widget.chapters[chapterIndex];
+                  return ListTile(
+                    title: Text('Chương ${item.number}: ${item.title}'),
+                    onTap: () async {
+                      Navigator.pop(sheetContext);
+                      if (chapterIndex == index) return;
+                      await flushProgress();
+                      index = chapterIndex;
+                      await loadChapter();
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+},
+onComments: () {
+  if (readingMode == 'Lật trang' &&
+      readerPageController.hasClients) {
+    readerPageController.animateToPage(
+      readerPageCount,
+      duration: const Duration(milliseconds: 350),
+      curve: Curves.easeInOut,
+    );
+  } else if (scroll.hasClients) {
+    scroll.animateTo(
+      scroll.position.maxScrollExtent,
+      duration: const Duration(milliseconds: 500),
+      curve: Curves.easeInOut,
+    );
+  }
+},
+  onNext: () => move(1),
+),
                 ],
               ),
       ),
@@ -1239,14 +2897,22 @@ class _ReaderPageState extends State<ReaderPage> {
 }
 
 class LibraryPage extends StatefulWidget {
-  const LibraryPage({super.key, required this.session, this.embedded = false});
+  const LibraryPage({
+    super.key,
+    required this.session,
+    this.embedded = false,
+    this.sort = 'saved',
+  });
+
   final Session session;
   final bool embedded;
+  final String sort;
+
   @override
   State<LibraryPage> createState() => _LibraryPageState();
 }
 /*
-class _LibraryPageState extends State<LibraryPage>{List<Map<String,dynamic>>items=[];int page=1,total=0;bool loading=true;String?error;@override void initState(){super.initState();load();}Future<void>load({bool reset=true})async{if(reset){page=1;setState(()=>loading=true);}try{final r=await widget.session.api.get('/api/me/library',query:{'page':'$page','pageSize':'20','sort':'saved'},auth:true);final got=(r['items']as List).map((e)=>Map<String,dynamic>.from(e)).toList();if(mounted)setState((){items=reset?got:[...items,...got];total=i(r['totalItems']);loading=false;error=null;});}catch(e){if(mounted)setState((){loading=false;error=errorText(e);});}}@override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Tủ sách')),body:loading?const Center(child:CircularProgressIndicator()):error!=null?ErrorRetry(error!,load):RefreshIndicator(onRefresh:load,child:items.isEmpty?ListView(children:const[SizedBox(height:200),Center(child:Text('Tủ sách đang trống.'))]):ListView.builder(itemCount:items.length+(items.length<total?1:0),itemBuilder:(_,n){if(n==items.length)return TextButton(onPressed:(){page++;load(reset:false);},child:const Text('Xem thêm'));final x=items[n],id=s(x['novelId'])!;return ListTile(leading:Cover(s(x['coverUrl']),width:58,height:82),title:Text(s(x['title'])??''),subtitle:Text(s(x['originalAuthor'])??'Chưa rõ tác giả'),trailing:IconButton(icon:const Icon(Icons.bookmark_remove),onPressed:()async{await widget.session.api.delete('/api/me/library/$id',auth:true);load();}),onTap:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>NovelDetailPage(session:widget.session,novelId:id))).then((_)=>load()));}))));}
+class _LibraryPageState extends State<LibraryPage>{List<Map<String,dynamic>>items=[];int page=1,total=0;bool loading=true;String?error;@override void initState(){super.initState();load();}Future<void>load({bool reset=true})async{if(reset){page=1;setState(()=>loading=true);}try{final r=await widget.session.api.get('/api/me/library',query:{'page':'$page','pageSize':'20','sort':'saved'},auth:true);final got=(r['items']as List).map((e)=>Map<String,dynamic>.from(e)).toList();if(mounted)setState((){items=reset?got:[...items,...got];total=i(r['totalItems']);loading=false;error=null;});}catch(e){if(mounted)setState(()=>loading=false;error=errorText(e););}}@override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Tủ sách')),body:loading?const Center(child:CircularProgressIndicator()):error!=null?ErrorRetry(error!,load):RefreshIndicator(onRefresh:load,child:items.isEmpty?ListView(children:const[SizedBox(height:200),Center(child:Text('Tủ sách đang trống.'))]):ListView.builder(itemCount:items.length+(items.length<total?1:0),itemBuilder:(_,n){if(n==items.length)return TextButton(onPressed:(){page++;load(reset:false);},child:const Text('Xem thêm'));final x=items[n],id=s(x['novelId'])!;return ListTile(leading:Cover(s(x['coverUrl']),width:58,height:82),title:Text(s(x['title'])??''),subtitle:Text(s(x['originalAuthor'])??'Chưa rõ tác giả'),trailing:IconButton(icon:const Icon(Icons.bookmark_remove),onPressed:()async{await widget.session.api.delete('/api/me/library/$id',auth:true);load();}),onTap:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>NovelDetailPage(session:widget.session,novelId:id))).then((_)=>load()));}))));}
 */
 
 class HistoryPage extends StatefulWidget {
@@ -1257,33 +2923,21 @@ class HistoryPage extends StatefulWidget {
   State<HistoryPage> createState() => _HistoryPageState();
 }
 /*
-class _HistoryPageState extends State<HistoryPage>{List<Map<String,dynamic>>items=[];int page=1,total=0;bool loading=true;String?error;@override void initState(){super.initState();load();}Future<void>load({bool reset=true})async{if(reset){page=1;setState(()=>loading=true);}try{final r=await widget.session.api.get('/api/me/history',query:{'page':'$page','pageSize':'20'},auth:true);final got=(r['items']as List).map((e)=>Map<String,dynamic>.from(e)).toList();if(mounted)setState((){items=reset?got:[...items,...got];total=i(r['totalItems']);loading=false;error=null;});}catch(e){if(mounted)setState((){loading=false;error=errorText(e);});}}@override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Lịch sử đọc')),body:loading?const Center(child:CircularProgressIndicator()):error!=null?ErrorRetry(error!,load):RefreshIndicator(onRefresh:load,child:items.isEmpty?ListView(children:const[SizedBox(height:200),Center(child:Text('Chưa có lịch sử đọc.'))]):ListView.builder(itemCount:items.length+(items.length<total?1:0),itemBuilder:(_,n){if(n==items.length)return TextButton(onPressed:(){page++;load(reset:false);},child:const Text('Xem thêm'));final x=items[n],available=x['available']==true;return ListTile(enabled:available,leading:Icon(available?Icons.menu_book:Icons.lock),title:Text(s(x['novelTitle'])??''),subtitle:Text(available?'Chương ${i(x['chapterNumber'])}: ${s(x['chapterTitle'])??''}':'Không còn khả dụng'),onTap:available?()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>NovelDetailPage(session:widget.session,novelId:s(x['novelId'])!))):null);}))));}
+class _HistoryPageState extends State<HistoryPage>{List<Map<String,dynamic>>items=[];int page=1,total=0;bool loading=true;String?error;@override void initState(){super.initState();load();}Future<void>load({bool reset=true})async{if(reset){page=1;setState(()=>loading=true);}try{final r=await widget.session.api.get('/api/me/history',query:{'page':'$page','pageSize':'20'},auth:true);final got=(r['items']as List).map((e)=>Map<String,dynamic>.from(e)).toList();if(mounted)setState((){items=reset?got:[...items,...got];total=i(r['totalItems']);loading=false;error=null;});}catch(e){if(mounted)setState(()=>loading=false;error=errorText(e););}}@override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Lịch sử đọc')),body:loading?const Center(child:CircularProgressIndicator()):error!=null?ErrorRetry(error!,load):RefreshIndicator(onRefresh:load,child:items.isEmpty?ListView(children:const[SizedBox(height:200),Center(child:Text('Chưa có lịch sử đọc.'))]):ListView.builder(itemCount:items.length+(items.length<total?1:0),itemBuilder:(_,n){if(n==items.length)return TextButton(onPressed:(){page++;load(reset:false);},child:const Text('Xem thêm'));final x=items[n],available=x['available']==true;return ListTile(enabled:available,leading:Icon(available?Icons.menu_book:Icons.lock),title:Text(s(x['novelTitle'])??''),subtitle:Text(available?'Chương ${i(x['chapterNumber'])}: ${s(x['chapterTitle'])??''}':'Không còn khả dụng'),onTap:available?()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>NovelDetailPage(session:widget.session,novelId:s(x['novelId'])!))):null);}))));}
 */
 
 abstract class _PagedPrivateState<T extends StatefulWidget> extends State<T> {
   List<Map<String, dynamic>> items = [];
   int page = 1, total = 0;
-  int generation = 0;
-  bool loading = true, loadingMore = false;
-  String? error, loadMoreError;
-  final scroll = ScrollController();
+  bool loading = true;
+  String? error;
   Session get session;
   String get path;
   Map<String, String?> get extraQuery => {};
   Future<void> load({bool reset = true}) async {
-    if (!reset && (loadingMore || items.length >= total)) return;
-    final mine = reset ? ++generation : generation;
     if (reset) {
       page = 1;
-      setState(() {
-        loading = true;
-        error = null;
-      });
-    } else {
-      setState(() {
-        loadingMore = true;
-        loadMoreError = null;
-      });
+      setState(() => loading = true);
     }
     try {
       final r = await session.api.get(
@@ -1294,31 +2948,19 @@ abstract class _PagedPrivateState<T extends StatefulWidget> extends State<T> {
       final got = (r['items'] as List)
           .map((e) => Map<String, dynamic>.from(e))
           .toList();
-      if (mounted && mine == generation) {
+      if (mounted) {
         setState(() {
-          final combined = reset ? got : [...items, ...got];
-          final seen = <String>{};
-          items = combined.where((x) {
-            final key = s(x['historyId']) ?? s(x['novelId']) ?? x.toString();
-            return seen.add(key);
-          }).toList();
+          items = reset ? got : [...items, ...got];
           total = i(r['totalItems']);
           loading = false;
-          loadingMore = false;
           error = null;
-          loadMoreError = null;
         });
       }
     } catch (e) {
-      if (mounted && mine == generation) {
+      if (mounted) {
         setState(() {
           loading = false;
-          loadingMore = false;
-          if (reset) {
-            error = errorText(e);
-          } else {
-            loadMoreError = errorText(e);
-          }
+          error = errorText(e);
         });
       }
     }
@@ -1327,42 +2969,7 @@ abstract class _PagedPrivateState<T extends StatefulWidget> extends State<T> {
   @override
   void initState() {
     super.initState();
-    scroll.addListener(() {
-      if (scroll.position.extentAfter < 240 &&
-          items.length < total &&
-          !loadingMore &&
-          loadMoreError == null) {
-        page++;
-        load(reset: false);
-      }
-    });
     load();
-  }
-
-  @override
-  void dispose() {
-    scroll.dispose();
-    super.dispose();
-  }
-
-  Widget loadMoreFooter() {
-    if (loadingMore) {
-      return const Padding(
-        padding: EdgeInsets.all(16),
-        child: Center(child: CircularProgressIndicator()),
-      );
-    }
-    if (loadMoreError != null) {
-      return TextButton.icon(
-        onPressed: () => load(reset: false),
-        icon: const Icon(Icons.refresh),
-        label: const Text('Tải thêm lỗi – Thử lại'),
-      );
-    }
-    return const Padding(
-      padding: EdgeInsets.all(16),
-      child: Center(child: Text('Đã tải hết dữ liệu')),
-    );
   }
 }
 
@@ -1372,10 +2979,18 @@ class _LibraryPageState extends _PagedPrivateState<LibraryPage> {
   @override
   String get path => '/api/me/library';
   @override
-  Map<String, String?> get extraQuery => {'sort': 'saved'};
+  Map<String, String?> get extraQuery => {'sort': widget.sort};
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: widget.embedded ? null : AppBar(title: const Text('Tủ sách')),
+    appBar: widget.embedded
+    ? null
+    : AppBar(
+        title: Text(
+          widget.sort == 'updated'
+              ? 'Đã lưu mới cập nhật'
+              : 'Lưu gần đây',
+        ),
+      ),
     body: loading
         ? const Center(child: CircularProgressIndicator())
         : error != null
@@ -1390,12 +3005,18 @@ class _LibraryPageState extends _PagedPrivateState<LibraryPage> {
                     ],
                   )
                 : ListView.builder(
-                    controller: scroll,
                     padding: const EdgeInsets.symmetric(horizontal: 16),
-                    itemCount: items.length + (items.length < total ? 1 : 0),
+                    itemCount: items.length +
+    (widget.sort != 'updated' && items.length < total ? 1 : 0),
                     itemBuilder: (_, n) {
                       if (n == items.length) {
-                        return loadMoreFooter();
+                        return TextButton(
+                          onPressed: () {
+                            page++;
+                            load(reset: false);
+                          },
+                          child: const Text('Xem thêm'),
+                        );
                       }
                       final x = items[n], id = s(x['novelId'])!;
                       final novel = Novel.from(x);
@@ -1436,6 +3057,111 @@ class _LibraryPageState extends _PagedPrivateState<LibraryPage> {
   );
 }
 
+class OfflineBooksPage extends StatefulWidget {
+  const OfflineBooksPage({
+    super.key,
+    required this.books,
+    required this.onOpen,
+    required this.onDelete,
+  });
+
+  final List<Map<String, dynamic>> books;
+  final ValueChanged<Map<String, dynamic>> onOpen;
+  final Future<void> Function(Map<String, dynamic>) onDelete;
+
+  @override
+  State<OfflineBooksPage> createState() => _OfflineBooksPageState();
+}
+
+class _OfflineBooksPageState extends State<OfflineBooksPage> {
+  late List<Map<String, dynamic>> books;
+
+  @override
+  void initState() {
+    super.initState();
+    books = List.of(widget.books);
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Truyện đã tải · Offline')),
+        body: books.isEmpty
+            ? const Center(child: Text('Chưa có truyện tải xuống.'))
+            : ListView.separated(
+                padding: const EdgeInsets.all(16),
+                itemCount: books.length,
+                separatorBuilder: (_, _) => const Divider(height: 1),
+                itemBuilder: (_, index) {
+                  final book = books[index];
+                  final novel = Novel.from({
+                    'novelId': book['novelId'],
+                    'title': book['title'],
+                    'originalAuthor': book['author'],
+                    'coverUrl': book['cover'],
+                    'completionStatus': 0,
+                  });
+                  final chapterCount =
+                      (book['chapters'] as List? ?? const []).length;
+
+                  return ListTile(
+                    contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                    leading: NoviCover(novel.cover, width: 58, height: 78),
+                    title: Text(
+                      novel.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: Text('$chapterCount chương đã tải'),
+                    trailing: IconButton(
+                      tooltip: 'Xóa bản tải xuống',
+                      icon: const Icon(Icons.delete_outline_rounded),
+                      onPressed: () async {
+                        await widget.onDelete(book);
+                        if (mounted) {
+                          setState(() => books.removeAt(index));
+                        }
+                      },
+                    ),
+                    onTap: () => widget.onOpen(book),
+                  );
+                },
+              ),
+      );
+}
+
+class OfflineChaptersPage extends StatelessWidget {
+  const OfflineChaptersPage({
+    super.key,
+    required this.title,
+    required this.chapters,
+    required this.onRead,
+  });
+
+  final String title;
+  final List<ChapterInfo> chapters;
+  final ValueChanged<int> onRead;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(
+          title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+        ),
+        body: ListView.separated(
+          padding: const EdgeInsets.all(16),
+          itemCount: chapters.length,
+          separatorBuilder: (_, _) => const Divider(height: 1),
+          itemBuilder: (_, index) => ListTile(
+            leading: const Icon(Icons.menu_book_outlined),
+            title: Text(
+              'Chương ${chapters[index].number}: ${chapters[index].title}',
+            ),
+            onTap: () => onRead(index),
+          ),
+        ),
+      );
+}
+
+
 class _HistoryPageState extends _PagedPrivateState<HistoryPage> {
   @override
   Session get session => widget.session;
@@ -1458,13 +3184,18 @@ class _HistoryPageState extends _PagedPrivateState<HistoryPage> {
                     ],
                   )
                 : ListView.separated(
-                    controller: scroll,
                     padding: const EdgeInsets.symmetric(horizontal: 16),
                     itemCount: items.length + (items.length < total ? 1 : 0),
                     separatorBuilder: (_, _) => const Divider(height: 1),
                     itemBuilder: (_, n) {
                       if (n == items.length) {
-                        return loadMoreFooter();
+                        return TextButton(
+                          onPressed: () {
+                            page++;
+                            load(reset: false);
+                          },
+                          child: const Text('Xem thêm'),
+                        );
                       }
                       final x = items[n], available = x['available'] == true;
                       return ListTile(
